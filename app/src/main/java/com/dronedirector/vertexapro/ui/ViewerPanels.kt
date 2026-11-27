@@ -20,6 +20,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Bookmark
+import androidx.compose.material.icons.outlined.BookmarkAdd
 import androidx.compose.material.icons.outlined.CenterFocusWeak
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.FolderZip
@@ -60,7 +62,7 @@ import com.dronedirector.vertexapro.data.formatCount
 import com.dronedirector.vertexapro.viewer.JobState
 import com.dronedirector.vertexapro.viewer.ViewerController
 
-enum class Panel { NONE, PARTS, LIGHT, POINTS, CAPTURE, EXPORT }
+enum class Panel { NONE, PARTS, LIGHT, POINTS, CAPTURE, EXPORT, VIEWS }
 
 @Composable
 private fun PanelShell(title: String, subtitle: String?, p: Palette, onClose: () -> Unit, content: @Composable () -> Unit) {
@@ -356,3 +358,33 @@ fun JobCard(job: JobState, p: Palette, onCancel: (() -> Unit)?, onDismiss: () ->
     }
 }
 
+
+// ---------------------------------------------------------------- saved views
+
+@Composable
+fun ViewsPanel(c: ViewerController, p: Palette, onClose: () -> Unit) {
+    PanelShell("Saved views", "Camera angles for this model · the last view is remembered", p, onClose) {
+        GradientButton("Save current view", Icons.Outlined.BookmarkAdd, p, Modifier.fillMaxWidth()) { c.saveView() }
+        VSpace(10.dp)
+        if (c.views.isEmpty()) {
+            Text("No saved views yet.", color = p.muted, fontSize = 13.sp)
+        }
+        LazyColumn(Modifier.heightIn(max = 340.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            items(c.views.size) { i ->
+                val v = c.views[i]
+                Row(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(p.glass)
+                        .pressable { c.goToView(i) }.padding(start = 12.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Outlined.Bookmark, null, tint = p.accent, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(10.dp))
+                    Text(v.name, color = p.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                    Box(Modifier.size(38.dp).clip(CircleShape).pressable { c.deleteView(i) }, contentAlignment = Alignment.Center) {
+                        Icon(Icons.Outlined.Close, "Delete", tint = p.muted, modifier = Modifier.size(18.dp))
+                    }
+                }
+            }
+        }
+    }
+}

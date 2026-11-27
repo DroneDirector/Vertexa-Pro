@@ -1,7 +1,9 @@
 #pragma once
 #include <GLES3/gl3.h>
 
+#include <array>
 #include <atomic>
+#include <cmath>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -79,6 +81,35 @@ public:
     void seekAnim(double seconds) { std::lock_guard<std::mutex> l(mu_); animTime_ = std::max(0.0, seconds); animDirty_ = true; }
     double animTime() { std::lock_guard<std::mutex> l(mu_); return animTime_; }
     void setAnimSpeed(double s) { std::lock_guard<std::mutex> l(mu_); animSpeed_ = s; }
+
+    // ---- saved views (any thread): target x, y, z, yaw, pitch, distance
+    std::array<double, 6> camera() {
+        std::lock_guard<std::mutex> l(mu_);
+        return {cam_.target.x, cam_.target.y, cam_.target.z, cam_.yaw, cam_.pitch, cam_.dist};
+    }
+    void setCamera(const std::array<double, 6>& c, bool animate) {
+        std::lock_guard<std::mutex> l(mu_);
+        Cam t;
+        t.target = V3(c[0], c[1], c[2]);
+        t.yaw = c[3];
+        t.pitch = c[4];
+        t.dist = c[5] > 0 ? c[5] : cam_.dist;
+        velYaw_ = velPitch_ = 0;
+        userMoved_ = true;
+        pendingReset_ = false;
+        if (animate) {
+            animFrom_ = cam_;
+            double d = std::fmod(animFrom_.yaw - t.yaw, 2 * M_PI);
+            if (d > M_PI) d -= 2 * M_PI;
+            if (d < -M_PI) d += 2 * M_PI;
+            animFrom_.yaw = t.yaw + d;
+            animTo_ = t;
+            animStart_ = lastTime_;
+        } else {
+            cam_ = t;
+            animStart_ = -1;
+        }
+    }
 
     // any thread
     void setMode(int m) { std::lock_guard<std::mutex> l(mu_); mode_ = m; }

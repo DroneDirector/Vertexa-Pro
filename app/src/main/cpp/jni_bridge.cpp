@@ -156,6 +156,19 @@ JNIEXPORT void JNICALL FN(nativeAnimSeek)(JNIEnv*, jobject, jlong h, jdouble t) 
 JNIEXPORT jdouble JNICALL FN(nativeAnimTime)(JNIEnv*, jobject, jlong h) { return E(h)->renderer.animTime(); }
 JNIEXPORT void JNICALL FN(nativeAnimSpeed)(JNIEnv*, jobject, jlong h, jdouble s) { E(h)->renderer.setAnimSpeed(s); }
 
+JNIEXPORT jdoubleArray JNICALL FN(nativeGetCamera)(JNIEnv* env, jobject, jlong h) {
+    auto c = E(h)->renderer.camera();
+    jdoubleArray a = env->NewDoubleArray(6);
+    env->SetDoubleArrayRegion(a, 0, 6, c.data());
+    return a;
+}
+JNIEXPORT void JNICALL FN(nativeSetCamera)(JNIEnv* env, jobject, jlong h, jdoubleArray arr, jboolean animate) {
+    if (env->GetArrayLength(arr) < 6) return;
+    std::array<double, 6> c;
+    env->GetDoubleArrayRegion(arr, 0, 6, c.data());
+    E(h)->renderer.setCamera(c, animate);
+}
+
 JNIEXPORT jboolean JNICALL FN(nativeCanEdit)(JNIEnv*, jobject, jlong h) { return E(h)->renderer.canEdit(); }
 JNIEXPORT jboolean JNICALL FN(nativeHasUndo)(JNIEnv*, jobject, jlong h) { return E(h)->renderer.hasUndo(); }
 JNIEXPORT void JNICALL FN(nativeSetCpuBudget)(JNIEnv*, jobject, jlong h, jlong bytes) {

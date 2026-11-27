@@ -1,5 +1,16 @@
 # Changelog
 
+## Cut tool, measure, animation and saved views
+
+- Cut tool (scissors on the right): tap points on the model around an area; near the start point you're asked whether to connect the last point with the first. Then "Create separate part" — the new part stays exactly in place
+- Three cut modes: Cut through (whole thickness — flaps, ailerons, rudders), One wall (outer + inner skin only, never the far side — doors, hatches) and Surface (one skin)
+- Cuts follow the drawn line exactly, however dense the mesh; the open edges on the new part and on the model are sealed automatically so nothing is see-through
+- Undo last cut, rename parts; cut parts stay separate objects when saved as OBJ
+- Convert & save now saves the edited model, and STL can be saved as one file per part
+- Measure tool: tap two points for the distance plus X / Y / Z, with a choice of model unit (m, cm, mm, in, ft) and the overall model size
+- Animation playback for animated FBX / glTF / DAE models: play/pause, scrub, choose clip, speed 0.25×–2×; node and skeletal animation
+- Saved views: bookmark camera angles per model; the last view of every model is remembered and restored
+
 ## Parts, lighting, capture and convert & save
 
 - Parts list (right side): every object/group in the model is a part you can show, hide, isolate or zoom to

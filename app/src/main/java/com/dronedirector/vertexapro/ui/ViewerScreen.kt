@@ -7,6 +7,7 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.outlined.AccountTree
+import androidx.compose.material.icons.outlined.Bookmarks
 import androidx.compose.material.icons.outlined.ContentCut
 import androidx.compose.material.icons.outlined.Straighten
 import androidx.compose.material.icons.outlined.Grain
@@ -214,6 +215,7 @@ fun ViewerScreen(
             if (c.stats.points > 0) {
                 RoundIconButton(Icons.Outlined.Grain, p, active = panel == Panel.POINTS, contentDescription = "Point cloud") { toggle(Panel.POINTS) }
             }
+            RoundIconButton(Icons.Outlined.Bookmarks, p, active = panel == Panel.VIEWS, contentDescription = "Saved views") { toggle(Panel.VIEWS) }
             RoundIconButton(Icons.Outlined.PhotoCamera, p, active = panel == Panel.CAPTURE, contentDescription = "Capture") { toggle(Panel.CAPTURE) }
             RoundIconButton(Icons.Outlined.SaveAlt, p, active = panel == Panel.EXPORT, contentDescription = "Convert & save") { toggle(Panel.EXPORT) }
             Box(Modifier.size(width = 28.dp, height = 1.dp).background(p.border))
@@ -363,6 +365,7 @@ fun ViewerScreen(
                 Panel.LIGHT -> LightingPanel(c, p, close)
                 Panel.POINTS -> PointsPanel(c, p, close)
                 Panel.CAPTURE -> CapturePanel(c, p, close)
+                Panel.VIEWS -> ViewsPanel(c, p, close)
                 Panel.EXPORT -> ExportPanel(
                     c, p,
                     onPickFolder = { f, vis -> pendingExport = f to vis; exportFolder.launch(null) },

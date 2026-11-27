@@ -153,6 +153,11 @@ class ViewerController(
         private set
     private var cutCount = 0
 
+    // saved views
+    private val viewStore = com.dronedirector.vertexapro.data.ViewStore(context)
+    var views by mutableStateOf(viewStore.views(source.uri.toString()))
+        private set
+
     // animation
     data class Clip(val name: String, val seconds: Double)
     var clips by mutableStateOf<List<Clip>>(emptyList())
@@ -295,6 +300,10 @@ class ViewerController(
         }
         if (clips.isNotEmpty()) setPlaying(true)
         canEdit = safe { NativeBridge.nativeCanEdit(handle) } ?: false
+        viewStore.last(source.uri.toString())?.let { cam ->
+            safe { NativeBridge.nativeSetCamera(handle, cam, true) }
+            view?.requestRender()
+        }
         if (!canEdit) info(1, "The model is too large to keep a second copy in memory, so the cut tool and saving edits are off for it.")
         // keep pumping frames until every chunk has reached the GPU
         scope.launch {
@@ -501,6 +510,30 @@ class ViewerController(
             measureActive -> addMeasurePoint(x, y)
             else -> pick(x, y)
         }
+    }
+
+    // ---------------------------------------------------------------- saved views
+    fun saveView(name: String? = null) {
+        val cam = safe { NativeBridge.nativeGetCamera(handle) } ?: return
+        val n = name?.takeIf { it.isNotBlank() } ?: "View ${views.size + 1}"
+        views = views + com.dronedirector.vertexapro.data.SavedView(n, cam)
+        viewStore.saveViews(source.uri.toString(), views)
+    }
+
+    fun goToView(i: Int) {
+        val v = views.getOrNull(i) ?: return
+        safe { NativeBridge.nativeSetCamera(handle, v.cam, true) }
+        view?.requestRender()
+    }
+
+    fun deleteView(i: Int) {
+        views = views.filterIndexed { k, _ -> k != i }
+        viewStore.saveViews(source.uri.toString(), views)
+    }
+
+    private fun rememberLastView() {
+        if (phase != Phase.READY) return
+        safe { NativeBridge.nativeGetCamera(handle) }?.let { viewStore.saveLast(source.uri.toString(), it) }
     }
 
     // ---------------------------------------------------------------- animation
@@ -889,6 +922,7 @@ class ViewerController(
     }
 
     fun dispose() {
+        rememberLastView()
         safe { NativeBridge.nativeCancel(handle) }
         val jobs = listOfNotNull(loadJob, textureJob)
         scope.cancel()

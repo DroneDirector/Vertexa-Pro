@@ -30,6 +30,8 @@ object NativeBridge {
     @JvmStatic external fun nativeAnimSeek(h: Long, seconds: Double)
     @JvmStatic external fun nativeAnimTime(h: Long): Double
     @JvmStatic external fun nativeAnimSpeed(h: Long, speed: Double)
+    @JvmStatic external fun nativeGetCamera(h: Long): DoubleArray
+    @JvmStatic external fun nativeSetCamera(h: Long, cam: DoubleArray, animate: Boolean)
     @JvmStatic external fun nativeCanEdit(h: Long): Boolean
     @JvmStatic external fun nativeHasUndo(h: Long): Boolean
     @JvmStatic external fun nativeSetCpuBudget(h: Long, bytes: Long)

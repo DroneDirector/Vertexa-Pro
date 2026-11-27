@@ -70,8 +70,8 @@ fun AnimationBar(c: ViewerController, p: Palette) {
                 Spacer(Modifier.width(6.dp))
             }
             Text("Speed", color = p.muted, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-            listOf(0.25f, 0.5f, 1f, 2f).forEach { sp ->
-                PillChip(if (sp < 1f) "${sp}×" else "${sp.toInt()}×", c.animSpeed == sp, p) { c.updateAnimSpeed(sp) }
+            listOf(0.25f, 0.5f, 1f, 2f).forEach { speed ->
+                PillChip(if (speed < 1f) "${speed}×" else "${speed.toInt()}×", c.animSpeed == speed, p) { c.updateAnimSpeed(speed) }
             }
         }
     }

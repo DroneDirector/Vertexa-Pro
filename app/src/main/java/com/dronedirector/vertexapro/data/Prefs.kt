@@ -191,3 +191,37 @@ fun formatCount(n: Long): String = when {
     n >= 10_000 -> String.format(Locale.US, "%.1fK", n / 1e3)
     else -> n.toString()
 }
+
+
+data class SavedView(val name: String, val cam: DoubleArray)
+
+/** Saved camera views and the last view, per model. */
+class ViewStore(context: Context) {
+    private val sp = context.getSharedPreferences("views", Context.MODE_PRIVATE)
+    private fun key(uri: String) = uri.hashCode().toUInt().toString(16)
+
+    fun views(uri: String): List<SavedView> {
+        val arr = runCatching { JSONArray(sp.getString("v_" + key(uri), "[]")) }.getOrElse { JSONArray() }
+        return (0 until arr.length()).mapNotNull { i ->
+            runCatching {
+                val o = arr.getJSONObject(i)
+                val c = o.getJSONArray("cam")
+                SavedView(o.getString("name"), DoubleArray(c.length()) { c.getDouble(it) })
+            }.getOrNull()
+        }
+    }
+
+    fun saveViews(uri: String, list: List<SavedView>) {
+        val arr = JSONArray()
+        list.forEach { v -> arr.put(JSONObject().put("name", v.name).put("cam", JSONArray(v.cam.toList()))) }
+        sp.edit().putString("v_" + key(uri), arr.toString()).apply()
+    }
+
+    fun last(uri: String): DoubleArray? = sp.getString("l_" + key(uri), null)?.let { s ->
+        runCatching { s.split(',').map { it.toDouble() }.toDoubleArray() }.getOrNull()?.takeIf { it.size == 6 }
+    }
+
+    fun saveLast(uri: String, cam: DoubleArray) {
+        if (cam.size == 6 && cam.all { it.isFinite() }) sp.edit().putString("l_" + key(uri), cam.joinToString(",")).apply()
+    }
+}
