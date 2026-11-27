@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "Vertexa", __VA_ARGS__)
 
@@ -274,7 +275,9 @@ void Renderer::clearModel() {
         cpuBytes_ = 0;
         keepCpu_ = true;
         rebuildGpu_ = false;
+        animated_ = false;
     }
+    anim_.reset();
     std::vector<GLuint> uniq;
     for (auto& t : textures_)
         if (std::find(uniq.begin(), uniq.end(), t.second) == uniq.end()) uniq.push_back(t.second);
@@ -313,6 +316,7 @@ void Renderer::setTexture(int material, int glTex) {
 void Renderer::upload(std::unique_ptr<Chunk> c) {
     uploadGpu(*c);
     std::lock_guard<std::mutex> l(dataMu_);
+    if (c->animSlot >= 0) animated_ = true;
     if (!keepCpu_) return;
     size_t bytes = c->verts.size() * sizeof(Vertex) + (c->tris.size() + c->lines.size()) * 4;
     if (cpuBytes_ + bytes > cpuBudget_) {
@@ -332,6 +336,7 @@ void Renderer::uploadGpu(const Chunk& cc) {
     g.material = c->material;
     g.part = c->part;
     g.points = c->points;
+    g.animSlot = c->animSlot;
     g.vertCount = (GLsizei)c->verts.size();
     g.triCount = (GLsizei)c->tris.size();
     g.lineCount = (GLsizei)c->lines.size();
@@ -541,6 +546,7 @@ bool Renderer::draw(Sink* sink, double now) {
                 bounds_ = sink->bounds();
                 materials_ = sink->materials();
                 parts_ = sink->parts();
+                if (sink->anim && !anim_) { anim_ = sink->anim; animDirty_ = true; }
                 if (hidden_.size() < parts_.size()) hidden_.resize(parts_.size(), 0);
                 if (!userMoved_) fitCamera(cam_, rotatedBounds(bounds_));
             }
@@ -597,6 +603,9 @@ bool Renderer::draw(Sink* sink, double now) {
             cam_.yaw += 0.45 * dt;
             more = true;
         }
+        if (anim_) {
+            if (animPlaying_) animTime_ += dt * animSpeed_;
+        }
         f = frameState();
         if (pickPending_) {
             doPick = true;
@@ -606,6 +615,21 @@ bool Renderer::draw(Sink* sink, double now) {
         }
     }
 
+    if (anim_) {
+        int clip;
+        double t;
+        bool play, dirty;
+        {
+            std::lock_guard<std::mutex> l(mu_);
+            clip = animClip_;
+            t = animTime_;
+            play = animPlaying_;
+            dirty = animDirty_ || play;
+            animDirty_ = false;
+        }
+        if (dirty) applyAnim(clip, t);
+        if (play) more = true;
+    }
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     renderScene(f, w_, h_, true, true);
     if (doPick) {
@@ -677,6 +701,22 @@ void Renderer::renderScene(const Frame& f, int w, int h, bool background, bool a
     const GLuint P = meshProg_;
     glUseProgram(P);
     GLint uShade = U(P, "uShade"), uKd = U(P, "uKd"), uHasTex = U(P, "uHasTex"), uLine = U(P, "uLine"), uSel = U(P, "uSel");
+    GLint uMVl = U(P, "uMV"), uNl = U(P, "uN");
+    auto setXf = [&](const Gpu& g) {
+        if (!g.hasXf) {
+            glUniformMatrix4fv(uMVl, 1, GL_FALSE, fmv);
+            glUniformMatrix3fv(uNl, 1, GL_FALSE, fn);
+            return;
+        }
+        M4 x;
+        for (int i = 0; i < 16; i++) x.m[i] = g.xf[i];
+        M4 m2 = mv * x;
+        float a[16], nn[9];
+        m2.toFloat(a);
+        nn[0] = a[0]; nn[1] = a[1]; nn[2] = a[2]; nn[3] = a[4]; nn[4] = a[5]; nn[5] = a[6]; nn[6] = a[8]; nn[7] = a[9]; nn[8] = a[10];
+        glUniformMatrix4fv(uMVl, 1, GL_FALSE, a);
+        glUniformMatrix3fv(uNl, 1, GL_FALSE, nn);
+    };
     glUniformMatrix4fv(U(P, "uMV"), 1, GL_FALSE, fmv);
     glUniformMatrix4fv(U(P, "uP"), 1, GL_FALSE, fp);
     glUniformMatrix4fv(U(P, "uM"), 1, GL_FALSE, fm);
@@ -722,6 +762,7 @@ void Renderer::renderScene(const Frame& f, int w, int h, bool background, bool a
             glUniform1i(uHasTex, hasTex ? 1 : 0);
             glUniform1f(uSel, g.part == f.selected ? 1.f : 0.f);
             glBindTexture(GL_TEXTURE_2D, hasTex ? tx->second : whiteTex_);
+            setXf(g);
             glBindVertexArray(g.vao);
             glDrawElements(GL_TRIANGLES, g.triCount, GL_UNSIGNED_INT, nullptr);
         }
@@ -742,6 +783,7 @@ void Renderer::renderScene(const Frame& f, int w, int h, bool background, bool a
         for (auto& g : gpu_) {
             if (g.points || !g.lbo || partHidden(f, g.part)) continue;
             glUniform1f(uSel, g.part == f.selected ? 1.f : 0.f);
+            setXf(g);
             glBindVertexArray(g.vao);
             glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g.lbo);
             glDrawElements(GL_LINES, g.lineCount, GL_UNSIGNED_INT, nullptr);
@@ -757,10 +799,47 @@ void Renderer::renderScene(const Frame& f, int w, int h, bool background, bool a
         if (mode == MODE_WIRE || mode == MODE_WIRE_CLEAN) memcpy(kd, th.wire, sizeof(float) * 3);
         glUniform4fv(uKd, 1, kd);
         glUniform1f(uSel, g.part == f.selected ? 1.f : 0.f);
+        setXf(g);
         glBindVertexArray(g.vao);
         glDrawArrays(GL_POINTS, 0, g.vertCount);
     }
     glBindVertexArray(0);
+}
+
+void Renderer::applyAnim(int clip, double seconds) {
+    if (!anim_) return;
+    std::vector<aiMatrix4x4> G;
+    anim_->evaluate(clip, seconds, G);
+    std::vector<Vertex> tmp;
+    for (auto& g : gpu_) {
+        if (g.animSlot < 0 || g.animSlot >= (int)anim_->inst.size()) continue;
+        const AnimInstance& in = anim_->inst[g.animSlot];
+        if (in.skinned) {
+            skinInstance(in, G, tmp);
+            glBindBuffer(GL_ARRAY_BUFFER, g.vbo);
+            glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)(tmp.size() * sizeof(Vertex)), tmp.data());
+            g.hasXf = false;
+        } else if (in.node >= 0 && in.node < (int)G.size()) {
+            aiMatrix4x4 m = G[in.node] * in.bindInv;
+            const float* r = &m.a1;  // row-major
+            for (int row = 0; row < 4; row++)
+                for (int col = 0; col < 4; col++) g.xf[col * 4 + row] = r[row * 4 + col];
+            g.hasXf = true;
+        }
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
+std::vector<std::string> Renderer::animClips() {
+    std::vector<std::string> out;
+    std::lock_guard<std::mutex> l(mu_);
+    if (!anim_) return out;
+    for (size_t i = 0; i < anim_->clips.size(); i++) {
+        char buf[48];
+        snprintf(buf, sizeof buf, "|%.3f", anim_->clipSeconds((int)i));
+        out.push_back(anim_->clips[i].name + buf);
+    }
+    return out;
 }
 
 void Renderer::renderPick(const Frame& f, int x, int y) {
@@ -818,6 +897,15 @@ void Renderer::renderPick(const Frame& f, int x, int y) {
             if (partHidden(f, g.part)) continue;
             int id = g.part + 1;
             glUniform4f(uId, (id & 255) / 255.f, ((id >> 8) & 255) / 255.f, ((id >> 16) & 255) / 255.f, 1.f);
+            if (g.hasXf) {
+                M4 x;
+                for (int i = 0; i < 16; i++) x.m[i] = g.xf[i];
+                float a[16];
+                (mv * x).toFloat(a);
+                glUniformMatrix4fv(U(pickProg_, "uMV"), 1, GL_FALSE, a);
+            } else {
+                glUniformMatrix4fv(U(pickProg_, "uMV"), 1, GL_FALSE, fmv);
+            }
             glBindVertexArray(g.vao);
             if (g.points) glDrawArrays(GL_POINTS, 0, g.vertCount);
             else if (g.triCount) glDrawElements(GL_TRIANGLES, g.triCount, GL_UNSIGNED_INT, nullptr);

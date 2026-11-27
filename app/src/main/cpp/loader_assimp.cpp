@@ -13,8 +13,12 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <cstdio>
 #include <map>
 
+#include <functional>
+
+#include "anim.h"
 #include "loaders.h"
 #include "reader.h"
 
@@ -124,6 +128,134 @@ private:
 
 std::mutex gLogMu;
 
+// Animated models keep their node hierarchy and bones (no flattening) so they can play.
+std::string buildAnimated(const aiScene* sc, Sink& sink, int base) {
+    auto data = std::make_shared<AnimData>();
+    std::map<std::string, int> nodeIdx;
+    std::vector<const aiNode*> nodePtr;
+    std::function<void(const aiNode*, int)> walk = [&](const aiNode* nd, int parent) {
+        int id = (int)data->nodes.size();
+        data->nodes.push_back(AnimNode{nd->mName.C_Str(), parent, nd->mTransformation});
+        nodePtr.push_back(nd);
+        nodeIdx.emplace(nd->mName.C_Str(), id);
+        for (unsigned c = 0; c < nd->mNumChildren; c++) walk(nd->mChildren[c], id);
+    };
+    walk(sc->mRootNode, -1);
+    std::vector<aiMatrix4x4> G;
+    data->evaluate(-1, 0, G);
+
+    for (unsigned a = 0; a < sc->mNumAnimations; a++) {
+        const aiAnimation* an = sc->mAnimations[a];
+        AnimClip clip;
+        clip.name = an->mName.length ? an->mName.C_Str() : "Animation " + std::to_string(a + 1);
+        clip.duration = an->mDuration;
+        clip.tps = an->mTicksPerSecond > 0 ? an->mTicksPerSecond : 25;
+        for (unsigned c = 0; c < an->mNumChannels; c++) {
+            const aiNodeAnim* na = an->mChannels[c];
+            auto it = nodeIdx.find(na->mNodeName.C_Str());
+            if (it == nodeIdx.end()) continue;
+            AnimChannel ch;
+            ch.node = it->second;
+            for (unsigned k = 0; k < na->mNumPositionKeys; k++) ch.pos.push_back({na->mPositionKeys[k].mTime, na->mPositionKeys[k].mValue});
+            for (unsigned k = 0; k < na->mNumScalingKeys; k++) ch.scl.push_back({na->mScalingKeys[k].mTime, na->mScalingKeys[k].mValue});
+            for (unsigned k = 0; k < na->mNumRotationKeys; k++) ch.rot.push_back({na->mRotationKeys[k].mTime, na->mRotationKeys[k].mValue});
+            clip.channels.push_back(std::move(ch));
+        }
+        char secs[32];
+        snprintf(secs, sizeof secs, "%.1f s", clip.duration / clip.tps);
+        sink.log(0, "Animation \"" + clip.name + "\": " + std::to_string(clip.channels.size()) + " animated nodes, " + secs);
+        data->clips.push_back(std::move(clip));
+    }
+
+    std::vector<std::unique_ptr<Chunk>> chunks;
+    std::map<std::string, int> partByName;
+    for (size_t ni = 0; ni < nodePtr.size(); ni++) {
+        const aiNode* nd = nodePtr[ni];
+        for (unsigned mi = 0; mi < nd->mNumMeshes; mi++) {
+            const aiMesh* me = sc->mMeshes[nd->mMeshes[mi]];
+            if (!me->mNumVertices) continue;
+            AnimInstance in;
+            in.node = (int)ni;
+            in.skinned = me->HasBones();
+            in.bindInv = G[ni];
+            in.bindInv.Inverse();
+            in.basePos.assign(me->mVertices, me->mVertices + me->mNumVertices);
+            if (me->HasNormals()) in.baseNrm.assign(me->mNormals, me->mNormals + me->mNumVertices);
+            else in.baseNrm.assign(me->mNumVertices, aiVector3D(0, 1, 0));
+            if (in.skinned) {
+                in.bi.assign(me->mNumVertices, {0, 0, 0, 0});
+                in.bw.assign(me->mNumVertices, {0, 0, 0, 0});
+                for (unsigned b = 0; b < me->mNumBones && b < 65535; b++) {
+                    const aiBone* bone = me->mBones[b];
+                    auto it = nodeIdx.find(bone->mName.C_Str());
+                    in.boneNode.push_back(it == nodeIdx.end() ? -1 : it->second);
+                    in.boneOffset.push_back(bone->mOffsetMatrix);
+                    for (unsigned w = 0; w < bone->mNumWeights; w++) {
+                        unsigned vid = bone->mWeights[w].mVertexId;
+                        float wt = bone->mWeights[w].mWeight;
+                        if (vid >= me->mNumVertices) continue;
+                        int slot = 0;
+                        for (int k = 1; k < 4; k++) if (in.bw[vid][k] < in.bw[vid][slot]) slot = k;
+                        if (wt > in.bw[vid][slot]) { in.bw[vid][slot] = wt; in.bi[vid][slot] = (uint16_t)b; }
+                    }
+                }
+            }
+            // bind-pose vertices in scene space
+            aiMatrix3x3 nr(G[ni]);
+            in.bindVerts.resize(me->mNumVertices);
+            for (unsigned k = 0; k < me->mNumVertices; k++) {
+                Vertex& v = in.bindVerts[k];
+                aiVector3D p = G[ni] * in.basePos[k];
+                aiVector3D n = nr * in.baseNrm[k];
+                v.p[0] = p.x; v.p[1] = p.y; v.p[2] = p.z;
+                v.n = packNormal(n.x, n.y, n.z);
+                if (me->HasTextureCoords(0)) { v.uv[0] = me->mTextureCoords[0][k].x; v.uv[1] = me->mTextureCoords[0][k].y; }
+                else v.uv[0] = v.uv[1] = 0;
+                if (me->HasVertexColors(0)) {
+                    auto& cc = me->mColors[0][k];
+                    v.c = packColor(cc.r, cc.g, cc.b, cc.a);
+                } else v.c = kWhite;
+            }
+            if (in.skinned) {
+                std::vector<Vertex> sk;
+                skinInstance(in, G, sk);
+                in.bindVerts.swap(sk);
+            }
+            auto c = std::make_unique<Chunk>();
+            c->material = base + (sc->mNumMaterials ? (int)me->mMaterialIndex : 0);
+            std::string pname = nd->mName.length ? nd->mName.C_Str() : (me->mName.length ? me->mName.C_Str() : "Mesh");
+            auto pit = partByName.find(pname);
+            c->part = pit != partByName.end() ? pit->second : (partByName[pname] = sink.addPart(pname));
+            c->points = me->mPrimitiveTypes == aiPrimitiveType_POINT;
+            c->verts = in.bindVerts;
+            for (unsigned f = 0; f < me->mNumFaces; f++) {
+                const aiFace& fc = me->mFaces[f];
+                if (fc.mNumIndices == 3) {
+                    c->tris.insert(c->tris.end(), {fc.mIndices[0], fc.mIndices[1], fc.mIndices[2]});
+                    c->lines.insert(c->lines.end(), {fc.mIndices[0], fc.mIndices[1], fc.mIndices[1], fc.mIndices[2],
+                                                     fc.mIndices[2], fc.mIndices[0]});
+                } else if (fc.mNumIndices == 2) {
+                    c->lines.insert(c->lines.end(), {fc.mIndices[0], fc.mIndices[1]});
+                }
+            }
+            if (!me->HasNormals()) {
+                std::vector<bool> hn(c->verts.size(), false);
+                computeMissingNormals(*c, hn);
+                for (size_t k = 0; k < c->verts.size(); k++) in.bindVerts[k].n = c->verts[k].n;
+            }
+            c->animSlot = (int)data->inst.size();
+            data->inst.push_back(std::move(in));
+            chunks.push_back(std::move(c));
+        }
+    }
+    sink.anim = data;  // published before the chunks that refer to it
+    for (auto& c : chunks) sink.push(std::move(c));
+    sink.log(0, "Animated model: " + std::to_string(data->nodes.size()) + " nodes, " + std::to_string(data->inst.size()) +
+                    " mesh instances, " + std::to_string(data->clips.size()) + " animation(s).");
+    if (sink.vertexCount.load() == 0) return "No geometry found in this file.";
+    return "";
+}
+
 }  // namespace
 
 std::string loadAssimp(int fd, int64_t size, const std::string& name, Sink& sink, Resolver& res) {
@@ -143,8 +275,10 @@ std::string loadAssimp(int fd, int64_t size, const std::string& name, Sink& sink
     imp.SetPropertyInteger(AI_CONFIG_PP_SBP_REMOVE, 0);
     const aiScene* sc = imp.ReadFile(std::string(kRoot) + name,
                                      aiProcess_Triangulate | aiProcess_JoinIdenticalVertices |
-                                         aiProcess_GenSmoothNormals | aiProcess_PreTransformVertices |
+                                         aiProcess_GenSmoothNormals | aiProcess_LimitBoneWeights |
                                          aiProcess_SortByPType);
+    bool animated = sc && sc->mRootNode && sc->mNumAnimations > 0;
+    if (sc && sc->mRootNode && !animated) sc = imp.ApplyPostProcessing(aiProcess_PreTransformVertices);
     ::close(fd);
     if (sink.cancel.load()) return "cancelled";
     if (sc) {
@@ -202,6 +336,8 @@ std::string loadAssimp(int fd, int64_t size, const std::string& name, Sink& sink
         m.name = "default";
         sink.addMaterial(m);
     }
+
+    if (animated) return buildAnimated(sc, sink, base);
 
     bool haveOrigin = false;
     double o[3] = {0, 0, 0};

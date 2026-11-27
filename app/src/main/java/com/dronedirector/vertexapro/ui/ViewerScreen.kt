@@ -231,6 +231,7 @@ fun ViewerScreen(
             Modifier.align(Alignment.BottomCenter).fillMaxWidth().navigationBarsPadding().padding(bottom = 14.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
+            if (!c.cutActive && !c.measureActive) AnimationBar(c, p)
             AnimatedVisibility(c.lastCut != null, enter = fadeIn() + slideInVertically { it }, exit = fadeOut()) {
                 LastCutBar(c, p)
             }

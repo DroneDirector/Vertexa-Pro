@@ -44,9 +44,12 @@ inline uint32_t packColor(float r, float g, float b, float a = 1.f) {
 
 constexpr uint32_t kWhite = 0xFFFFFFFFu;
 
+struct AnimData;
+
 struct Chunk {
     int material = 0;
     int part = 0;
+    int animSlot = -1;  // >= 0: driven by AnimData::inst[animSlot]
     bool points = false;
     std::vector<Vertex> verts;
     std::vector<uint32_t> tris;
@@ -191,6 +194,7 @@ public:
         return (int)materials_.size();
     }
     std::vector<EmbeddedTexture> embedded;  // written by loader before finish only
+    std::shared_ptr<AnimData> anim;         // set by the loader for animated models, before their chunks
     double origin[3] = {0, 0, 0};
 
     // ---- load report: 0 = info, 1 = warning, 2 = error

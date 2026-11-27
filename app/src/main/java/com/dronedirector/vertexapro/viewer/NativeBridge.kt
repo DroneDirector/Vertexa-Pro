@@ -25,6 +25,11 @@ object NativeBridge {
     @JvmStatic external fun nativeExportMemory(
         h: Long, format: Int, outFd: Int, mtlFd: Int, mtlName: String, hidden: BooleanArray, textures: Array<String>, onlyPart: Int,
     ): String
+    @JvmStatic external fun nativeAnimClips(h: Long): Array<String>
+    @JvmStatic external fun nativeAnimPlay(h: Long, clip: Int, play: Boolean)
+    @JvmStatic external fun nativeAnimSeek(h: Long, seconds: Double)
+    @JvmStatic external fun nativeAnimTime(h: Long): Double
+    @JvmStatic external fun nativeAnimSpeed(h: Long, speed: Double)
     @JvmStatic external fun nativeCanEdit(h: Long): Boolean
     @JvmStatic external fun nativeHasUndo(h: Long): Boolean
     @JvmStatic external fun nativeSetCpuBudget(h: Long, bytes: Long)

@@ -140,6 +140,22 @@ JNIEXPORT jstring JNICALL FN(nativeExport)(JNIEnv* env, jobject, jlong h, jint i
     return env->NewStringUTF(safeUtf8(err).c_str());
 }
 
+JNIEXPORT jobjectArray JNICALL FN(nativeAnimClips)(JNIEnv* env, jobject, jlong h) {
+    auto clips = E(h)->renderer.animClips();
+    jclass sc = env->FindClass("java/lang/String");
+    jobjectArray arr = env->NewObjectArray((jsize)clips.size(), sc, nullptr);
+    for (size_t i = 0; i < clips.size(); i++) {
+        jstring js = env->NewStringUTF(safeUtf8(clips[i]).c_str());
+        env->SetObjectArrayElement(arr, (jsize)i, js);
+        env->DeleteLocalRef(js);
+    }
+    return arr;
+}
+JNIEXPORT void JNICALL FN(nativeAnimPlay)(JNIEnv*, jobject, jlong h, jint clip, jboolean play) { E(h)->renderer.setAnim(clip, play); }
+JNIEXPORT void JNICALL FN(nativeAnimSeek)(JNIEnv*, jobject, jlong h, jdouble t) { E(h)->renderer.seekAnim(t); }
+JNIEXPORT jdouble JNICALL FN(nativeAnimTime)(JNIEnv*, jobject, jlong h) { return E(h)->renderer.animTime(); }
+JNIEXPORT void JNICALL FN(nativeAnimSpeed)(JNIEnv*, jobject, jlong h, jdouble s) { E(h)->renderer.setAnimSpeed(s); }
+
 JNIEXPORT jboolean JNICALL FN(nativeCanEdit)(JNIEnv*, jobject, jlong h) { return E(h)->renderer.canEdit(); }
 JNIEXPORT jboolean JNICALL FN(nativeHasUndo)(JNIEnv*, jobject, jlong h) { return E(h)->renderer.hasUndo(); }
 JNIEXPORT void JNICALL FN(nativeSetCpuBudget)(JNIEnv*, jobject, jlong h, jlong bytes) {

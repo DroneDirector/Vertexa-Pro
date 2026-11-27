@@ -7,6 +7,7 @@
 #include <mutex>
 #include <vector>
 
+#include "anim.h"
 #include "mesh.h"
 #include "vmath.h"
 
@@ -58,7 +59,7 @@ public:
         int64_t triangles = 0, capTriangles = 0;
         std::string error;
     };
-    bool canEdit() { std::lock_guard<std::mutex> l(dataMu_); return keepCpu_ && !cpu_.empty(); }
+    bool canEdit() { std::lock_guard<std::mutex> l(dataMu_); return keepCpu_ && !cpu_.empty() && !animated_; }
     CutResult cut(const CutRequest& req, Sink* sink);
     bool undoCut(Sink* sink);
     bool hasUndo() { std::lock_guard<std::mutex> l(dataMu_); return !undo_.empty(); }
@@ -71,6 +72,13 @@ public:
     struct CutCam;
     bool cutCamera(CutCam& cc);
     void setCpuBudget(size_t bytes) { std::lock_guard<std::mutex> l(dataMu_); cpuBudget_ = bytes; }
+
+    // ---- animation (any thread)
+    std::vector<std::string> animClips();   // "name|seconds"
+    void setAnim(int clip, bool playing) { std::lock_guard<std::mutex> l(mu_); animClip_ = clip; animPlaying_ = playing; animDirty_ = true; }
+    void seekAnim(double seconds) { std::lock_guard<std::mutex> l(mu_); animTime_ = std::max(0.0, seconds); animDirty_ = true; }
+    double animTime() { std::lock_guard<std::mutex> l(mu_); return animTime_; }
+    void setAnimSpeed(double s) { std::lock_guard<std::mutex> l(mu_); animSpeed_ = s; }
 
     // any thread
     void setMode(int m) { std::lock_guard<std::mutex> l(mu_); mode_ = m; }
@@ -102,6 +110,9 @@ private:
         int material = 0;
         int part = 0;
         bool points = false;
+        int animSlot = -1;
+        bool hasXf = false;
+        float xf[16];
     };
     struct Cam {
         V3 target;
@@ -178,6 +189,12 @@ private:
     std::vector<std::shared_ptr<Chunk>> cpu_;   // geometry kept for editing and saving
     std::vector<std::shared_ptr<Chunk>> undo_;  // geometry before the last cut
     bool keepCpu_ = true;
+    bool animated_ = false;
+    std::shared_ptr<AnimData> anim_;
+    int animClip_ = 0;
+    bool animPlaying_ = false, animDirty_ = false;
+    double animTime_ = 0, animSpeed_ = 1;
+    void applyAnim(int clip, double seconds);
     bool rebuildGpu_ = false;
     size_t cpuBytes_ = 0;
     size_t cpuBudget_ = (size_t)1500 << 20;

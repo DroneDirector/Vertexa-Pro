@@ -153,6 +153,20 @@ class ViewerController(
         private set
     private var cutCount = 0
 
+    // animation
+    data class Clip(val name: String, val seconds: Double)
+    var clips by mutableStateOf<List<Clip>>(emptyList())
+        private set
+    var clip by mutableIntStateOf(0)
+        private set
+    var playing by mutableStateOf(false)
+        private set
+    var animTime by mutableStateOf(0.0)
+        private set
+    var animSpeed by mutableFloatStateOf(1f)
+        private set
+    private var animPoll: Job? = null
+
     // measure tool
     var measureActive by mutableStateOf(false)
         private set
@@ -271,6 +285,15 @@ class ViewerController(
             return
         }
         phase = Phase.READY
+        for (attempt in 0 until 4) {  // the GL thread picks up animation data with the first frames
+            delay(150L * (attempt + 1))
+            clips = (safe { NativeBridge.nativeAnimClips(handle) } ?: emptyArray()).map {
+                Clip(it.substringBeforeLast('|'), it.substringAfterLast('|').toDoubleOrNull() ?: 0.0)
+            }
+            if (clips.isNotEmpty()) break
+            view?.requestRender()
+        }
+        if (clips.isNotEmpty()) setPlaying(true)
         canEdit = safe { NativeBridge.nativeCanEdit(handle) } ?: false
         if (!canEdit) info(1, "The model is too large to keep a second copy in memory, so the cut tool and saving edits are off for it.")
         // keep pumping frames until every chunk has reached the GPU
@@ -478,6 +501,37 @@ class ViewerController(
             measureActive -> addMeasurePoint(x, y)
             else -> pick(x, y)
         }
+    }
+
+    // ---------------------------------------------------------------- animation
+    fun setPlaying(on: Boolean) {
+        playing = on
+        safe { NativeBridge.nativeAnimPlay(handle, clip, on) }
+        view?.requestRender()
+        animPoll?.cancel()
+        if (on) animPoll = scope.launch {
+            while (isActive) {
+                animTime = safe { NativeBridge.nativeAnimTime(handle) } ?: 0.0
+                delay(50)
+            }
+        }
+    }
+
+    fun selectClip(i: Int) {
+        clip = i
+        seek(0.0)
+        safe { NativeBridge.nativeAnimPlay(handle, i, playing) }
+    }
+
+    fun seek(seconds: Double) {
+        animTime = seconds
+        safe { NativeBridge.nativeAnimSeek(handle, seconds) }
+        view?.requestRender()
+    }
+
+    fun updateAnimSpeed(s: Float) {
+        animSpeed = s
+        safe { NativeBridge.nativeAnimSpeed(handle, s.toDouble()) }
     }
 
     // ---------------------------------------------------------------- measure tool
