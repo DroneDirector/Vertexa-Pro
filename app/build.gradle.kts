@@ -5,7 +5,17 @@ plugins {
 }
 
 val buildNumber = (project.findProperty("buildNumber") as String?)?.toIntOrNull() ?: 1
-val ksFile = System.getenv("VERTEXA_KEYSTORE")?.let { file(it) }
+import java.util.Properties
+
+// Signing: CI secrets if present, otherwise the key kept in the repository's signing/ folder.
+val envKs = System.getenv("VERTEXA_KEYSTORE")?.let { file(it) }
+val repoProps = Properties().apply {
+    val f = rootProject.file("signing/signing.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
+val ksFile = envKs ?: rootProject.file("signing/vertexa-release.jks").takeIf { it.exists() }
+fun signingValue(env: String, prop: String): String? =
+    System.getenv(env)?.takeIf { it.isNotEmpty() } ?: repoProps.getProperty(prop)
 
 android {
     namespace = "com.dronedirector.vertexapro"
@@ -31,9 +41,9 @@ android {
         if (ksFile != null && ksFile.exists()) {
             create("release") {
                 storeFile = ksFile
-                storePassword = System.getenv("VERTEXA_KS_PASS")
-                keyAlias = System.getenv("VERTEXA_KEY_ALIAS")
-                keyPassword = System.getenv("VERTEXA_KEY_PASS")
+                storePassword = signingValue("VERTEXA_KS_PASS", "storePassword")
+                keyAlias = signingValue("VERTEXA_KEY_ALIAS", "keyAlias")
+                keyPassword = signingValue("VERTEXA_KEY_PASS", "keyPassword")
             }
         }
     }
