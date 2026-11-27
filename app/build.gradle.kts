@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -5,8 +7,6 @@ plugins {
 }
 
 val buildNumber = (project.findProperty("buildNumber") as String?)?.toIntOrNull() ?: 1
-import java.util.Properties
-
 // Signing: CI secrets if present, otherwise the key kept in the repository's signing/ folder.
 val envKs = System.getenv("VERTEXA_KEYSTORE")?.let { file(it) }
 val repoProps = Properties().apply {
