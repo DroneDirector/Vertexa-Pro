@@ -66,10 +66,16 @@ class ViewerController(
     var view: ModelSurfaceView? = null
     private var maxTex = 4096
 
-    val resolver = SiblingResolver(
+    private var resolver = SiblingResolver(
         context, source.extras, source.tree,
         source.relPath?.substringBeforeLast('/', "")?.ifEmpty { null },
     )
+    /** What is actually loaded: the picked file, or the model inside a picked archive. */
+    private var loadSource = source
+    var stage by mutableStateOf("Opening model")
+        private set
+    var stageSize by mutableLongStateOf(source.size)
+        private set
 
     var phase by mutableStateOf(Phase.LOADING)
         private set
@@ -151,8 +157,30 @@ class ViewerController(
             else -> "file picker (model only)"
         })
         val t0 = System.nanoTime()
-        val needsSeek = Formats.ext(source.name) !in Formats.native
-        val fd = withContext(Dispatchers.IO) { SiblingResolver.openSeekableFd(context, source.uri, needsSeek) }
+        stageSize = source.size
+        val isZip = withContext(Dispatchers.IO) { ModelPrep.isZip(context, source.uri) }
+        if (isZip) {
+            stage = "Unpacking archive"
+            val prep = withContext(Dispatchers.IO) {
+                runCatching { ModelPrep.prepare(context, source) { f -> progress = f } }
+            }
+            val p = prep.getOrElse { e ->
+                error = e.message ?: "The archive could not be unpacked."
+                info(2, "Unpacking failed: ${e.message}")
+                rebuildReport()
+                phase = Phase.ERROR
+                return
+            }
+            p.notes.forEach { info(it.level, it.text) }
+            loadSource = p.source
+            resolver = SiblingResolver(context, loadSource.extras, null, null)
+            if (Formats.defaultZUp(loadSource.name) != upZ) toggleUpAxis()
+            progress = 0f
+        }
+        stage = "Opening model"
+        stageSize = loadSource.size
+        val needsSeek = Formats.ext(loadSource.name) !in Formats.native
+        val fd = withContext(Dispatchers.IO) { SiblingResolver.openSeekableFd(context, loadSource.uri, needsSeek) }
         if (fd < 0) {
             error = "The file could not be opened. It may have been moved, deleted, or access has expired. Open it again from your files."
             info(2, "Android refused to open the file (permission expired, file moved, or cloud file unavailable).")
@@ -168,7 +196,7 @@ class ViewerController(
             }
         }
         val err = withContext(Dispatchers.IO) {
-            NativeBridge.nativeLoad(handle, fd, source.size, source.name, resolver)
+            NativeBridge.nativeLoad(handle, fd, loadSource.size, loadSource.name, resolver)
         }
         poll.cancel()
         refreshStats()

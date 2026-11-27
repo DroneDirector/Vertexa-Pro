@@ -229,10 +229,10 @@ fun ViewerScreen(
                     Text(pct(c.progress), color = p.text, fontSize = 26.sp, fontWeight = FontWeight.Black)
                 }
                 VSpace(18.dp)
-                Text("Opening model", color = p.text, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                Text(c.stage, color = p.text, fontWeight = FontWeight.Bold, fontSize = 17.sp)
                 VSpace(4.dp)
                 Text(
-                    "Reading ${formatBytes((c.source.size * c.progress).toLong())} of ${formatBytes(c.source.size)}",
+                    "${if (c.stage.startsWith("Unpacking")) "Unpacking" else "Reading"} ${formatBytes((c.stageSize * c.progress).toLong())} of ${formatBytes(c.stageSize)}",
                     color = p.muted, fontSize = 13.sp, textAlign = TextAlign.Center,
                 )
                 VSpace(18.dp)

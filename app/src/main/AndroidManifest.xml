@@ -38,6 +38,7 @@
                 <data android:mimeType="application/x-wavefront-obj" />
                 <data android:mimeType="application/x-fbx" />
                 <data android:mimeType="application/x-blender" />
+                <data android:mimeType="application/zip" />
                 <data android:mimeType="application/octet-stream" />
             </intent-filter>
         </activity>

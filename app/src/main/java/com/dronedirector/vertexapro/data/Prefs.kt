@@ -13,8 +13,8 @@ object Formats {
         "fbx", "gltf", "glb", "dae", "3ds", "3mf", "dxf", "x", "off", "lwo", "lws",
         "blend", "ac", "ms3d",
     )
-    val all = native + assimp
-    val chips = listOf("OBJ", "FBX", "GLTF", "GLB", "STL", "PLY", "DAE", "3DS", "3MF", "BLEND", "DXF", "OFF", "LWO", "X")
+    val all = native + assimp + "zip"
+    val chips = listOf("OBJ", "FBX", "GLTF", "GLB", "STL", "PLY", "DAE", "3DS", "3MF", "BLEND", "DXF", "OFF", "LWO", "X", "ZIP")
 
     fun ext(name: String): String = name.substringAfterLast('.', "").lowercase(Locale.ROOT)
     fun isModel(name: String) = ext(name) in all

@@ -108,6 +108,12 @@ enum FaceResult { FACE_OK, FACE_DEFER, FACE_FEW, FACE_BAD };
 
 std::string loadObj(int fd, int64_t size, Sink& sink, Resolver& res) {
     FdReader r(fd, size, &sink, true);
+    {
+        unsigned char m[4] = {0, 0, 0, 0};
+        r.peek(m, 4);
+        if (m[0] == 'P' && m[1] == 'K' && m[2] == 3 && m[3] == 4)
+            return "This file is a ZIP archive with an .obj name, not an OBJ. Open it again and it will be unpacked.";
+    }
     std::vector<float> pos;     // xyz relative to origin
     std::vector<uint32_t> col;  // optional per-position colour
     std::vector<float> uv, nrm;

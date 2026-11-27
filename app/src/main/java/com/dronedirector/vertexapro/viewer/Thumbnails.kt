@@ -163,8 +163,12 @@ object ThumbnailGenerator {
         }
     }
 
-    private fun render(job: ThumbJob): Boolean {
+    private fun render(original: ThumbJob): Boolean {
         val ctx = appContext
+        val prep = ModelPrep.prepare(ctx, com.dronedirector.vertexapro.data.ModelSource(
+            original.uri, original.name, original.size, original.extras, original.tree, original.relPath))
+        val unpacked = prep.source.uri != original.uri
+        val job = if (unpacked) ThumbJob(prep.source.uri, prep.source.name, prep.source.size, prep.source.extras) else original
         val needsSeek = Formats.ext(job.name) !in Formats.native
         val fd = SiblingResolver.openSeekableFd(ctx, job.uri, needsSeek)
         if (fd < 0) return false
@@ -190,7 +194,7 @@ object ThumbnailGenerator {
             NativeBridge.nativeDraw(h, System.nanoTime())
             val buf = ByteBuffer.allocateDirect(s * s * 4).order(ByteOrder.nativeOrder())
             GLES30.glReadPixels(0, 0, s, s, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, buf)
-            ThumbnailStore.save(ctx, job.uri, ThumbnailStore.fromPixels(buf, s, s))
+            ThumbnailStore.save(ctx, original.uri, ThumbnailStore.fromPixels(buf, s, s))
             return true
         } finally {
             NativeBridge.nativeReleaseGl(h)

@@ -1,5 +1,12 @@
 # Changelog
 
+## ZIP archives
+
+- Models inside ZIP archives now open directly — including Meshy downloads, which are ZIP files even when named .obj
+- The archive is unpacked automatically, the best model inside is picked, and its MTL and textures are loaded with it
+- ZIP files appear in the folder browser and get thumbnails too
+- The load report says when a file was really an archive and what was inside
+
 ## Load report, model browser and thumbnails
 
 - New load report (Info → Load report, or Details when a file fails): shows how the file was read — vertex/face counts, materials, textures found or missing and why, skipped faces with example lines, unrecognised line types, importer warnings — with Copy and Share
