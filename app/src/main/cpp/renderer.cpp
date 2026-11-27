@@ -13,6 +13,31 @@ namespace {
 const double kFov = 45.0 * M_PI / 180.0;
 const double kDefYaw = 0.65, kDefPitch = 0.32;
 
+// Studio lighting presets (directions in view space).
+struct Lighting {
+    float l1[3], c1[3], l2[3], c2[3], sky[3], ground[3], spec, rim, flat;
+};
+const Lighting kLights[] = {
+    // 0 Studio
+    {{-0.45f, 0.65f, 0.62f}, {0.80f, 0.78f, 0.74f}, {0.70f, 0.10f, 0.45f}, {0.22f, 0.25f, 0.30f},
+     {0.42f, 0.43f, 0.46f}, {0.22f, 0.22f, 0.25f}, 0.22f, 0.18f, 0.f},
+    // 1 Soft box
+    {{0.0f, 0.5f, 0.85f}, {0.55f, 0.55f, 0.55f}, {-0.6f, 0.2f, 0.5f}, {0.30f, 0.30f, 0.32f},
+     {0.60f, 0.60f, 0.62f}, {0.45f, 0.45f, 0.47f}, 0.08f, 0.08f, 0.f},
+    // 2 Dramatic
+    {{-0.85f, 0.45f, 0.25f}, {1.15f, 1.0f, 0.85f}, {0.9f, 0.1f, -0.35f}, {0.35f, 0.45f, 0.70f},
+     {0.12f, 0.12f, 0.14f}, {0.05f, 0.05f, 0.06f}, 0.35f, 0.45f, 0.f},
+    // 3 Outdoor sun
+    {{0.30f, 0.85f, 0.40f}, {1.0f, 0.95f, 0.85f}, {0.0f, 1.0f, 0.0f}, {0.20f, 0.26f, 0.36f},
+     {0.45f, 0.52f, 0.65f}, {0.25f, 0.22f, 0.18f}, 0.20f, 0.05f, 0.f},
+    // 4 Rim light
+    {{0.10f, 0.30f, -0.90f}, {0.90f, 0.90f, 1.0f}, {-0.40f, 0.40f, 0.80f}, {0.25f, 0.25f, 0.27f},
+     {0.18f, 0.18f, 0.20f}, {0.10f, 0.10f, 0.11f}, 0.30f, 0.60f, 0.f},
+    // 5 Flat (no shading)
+    {{0, 0, 1}, {0, 0, 0}, {0, 0, 1}, {0, 0, 0}, {1, 1, 1}, {1, 1, 1}, 0.f, 0.f, 1.f},
+};
+const int kLightCount = sizeof(kLights) / sizeof(kLights[0]);
+
 const char* kMeshVs = R"(#version 300 es
 layout(location=0) in vec3 aPos;
 layout(location=1) in vec4 aNrm;
@@ -20,32 +45,52 @@ layout(location=2) in vec2 aUv;
 layout(location=3) in vec4 aCol;
 uniform mat4 uMV;
 uniform mat4 uP;
+uniform mat4 uM;
 uniform mat3 uN;
 uniform float uPointSize;
-out vec3 vN; out vec3 vV; out vec2 vUv; out vec4 vCol;
+out vec3 vN; out vec3 vV; out vec2 vUv; out vec4 vCol; out float vH;
 void main(){
   vec4 p = uMV * vec4(aPos, 1.0);
   vV = p.xyz;
   vN = uN * aNrm.xyz;
   vUv = aUv;
   vCol = aCol;
+  vH = (uM * vec4(aPos, 1.0)).y;
   gl_Position = uP * p;
   gl_PointSize = uPointSize;
 })";
 
 const char* kMeshFs = R"(#version 300 es
 precision highp float;
-in vec3 vN; in vec3 vV; in vec2 vUv; in vec4 vCol;
+in vec3 vN; in vec3 vV; in vec2 vUv; in vec4 vCol; in float vH;
 uniform int uShade;      // 0 textured, 1 clay, 2 flat line colour, 3 points
 uniform vec4 uKd;
 uniform sampler2D uTex;
 uniform int uHasTex;
 uniform vec3 uClay;
 uniform vec4 uLine;
+uniform vec3 uL1; uniform vec3 uC1; uniform vec3 uL2; uniform vec3 uC2;
+uniform vec3 uSky; uniform vec3 uGround;
+uniform float uSpec; uniform float uRim; uniform float uFlat;
+uniform float uSel; uniform vec3 uSelColor;
+uniform int uPointMode; uniform vec2 uHRange;
 out vec4 o;
+vec3 heat(float t){
+  t = clamp(t, 0.0, 1.0);
+  return clamp(vec3(1.5 - abs(4.0*t - 3.0), 1.5 - abs(4.0*t - 2.0), 1.5 - abs(4.0*t - 1.0)), 0.0, 1.0);
+}
 void main(){
-  if (uShade == 2) { o = uLine; return; }
-  if (uShade == 3) { o = vec4(vCol.rgb * uKd.rgb, 1.0); return; }
+  if (uShade == 2) { o = vec4(mix(uLine.rgb, uSelColor, uSel * 0.8), uLine.a); return; }
+  if (uShade == 3) {
+    vec2 pc = gl_PointCoord * 2.0 - 1.0;
+    if (dot(pc, pc) > 1.0) discard;
+    vec3 c;
+    if (uPointMode == 1) c = uKd.rgb;
+    else if (uPointMode == 2) c = heat((vH - uHRange.x) / max(uHRange.y - uHRange.x, 1e-9));
+    else c = vCol.rgb * uKd.rgb;
+    o = vec4(mix(c, uSelColor, uSel * 0.55), 1.0);
+    return;
+  }
   vec3 N = normalize(vN);
   if (!gl_FrontFacing) N = -N;
   vec3 V = normalize(-vV);
@@ -57,23 +102,36 @@ void main(){
   } else {
     base = uClay * vCol.rgb;
   }
-  vec3 L1 = normalize(vec3(-0.45, 0.65, 0.62));
-  vec3 L2 = normalize(vec3(0.70, 0.10, 0.45));
+  vec3 L1 = normalize(uL1);
+  vec3 L2 = normalize(uL2);
   float d1 = max(dot(N, L1), 0.0);
   float d2 = max(dot(N, L2), 0.0);
   float hemi = 0.5 + 0.5 * N.y;
-  vec3 amb = mix(vec3(0.22, 0.22, 0.25), vec3(0.42, 0.43, 0.46), hemi);
+  vec3 amb = mix(uGround, uSky, hemi);
   vec3 H = normalize(L1 + V);
   float spec = pow(max(dot(N, H), 0.0), 40.0);
   float rim = pow(1.0 - max(dot(N, V), 0.0), 3.0);
-  vec3 lit = base * (amb + vec3(1.0, 0.97, 0.93) * d1 * 0.80 + vec3(0.75, 0.82, 1.0) * d2 * 0.30);
+  vec3 lit = base * (amb + uC1 * d1 + uC2 * d2);
   if (uShade == 1) {
-    lit += vec3(spec * 0.22) + vec3(0.55, 0.75, 1.0) * rim * 0.18;
+    lit += vec3(spec * uSpec) + vec3(0.55, 0.75, 1.0) * rim * uRim;
   } else {
-    lit = mix(lit, base, 0.38) + vec3(spec * 0.06) + rim * 0.05;
+    lit = mix(lit, base, 0.38) + vec3(spec * uSpec * 0.3) + rim * uRim * 0.25;
   }
+  lit = mix(lit, base, uFlat);
+  lit = mix(lit, uSelColor, uSel * (0.30 + 0.25 * rim));
   o = vec4(lit, 1.0);
 })";
+
+const char* kPickVs = R"(#version 300 es
+layout(location=0) in vec3 aPos;
+uniform mat4 uMV; uniform mat4 uP; uniform float uPointSize;
+void main(){ gl_Position = uP * (uMV * vec4(aPos, 1.0)); gl_PointSize = uPointSize; })";
+
+const char* kPickFs = R"(#version 300 es
+precision highp float;
+uniform vec4 uId;
+out vec4 o;
+void main(){ o = uId; })";
 
 const char* kBgVs = R"(#version 300 es
 out vec2 vP;
@@ -145,12 +203,18 @@ GLuint link(const char* vs, const char* fs) {
 
 double easeInOut(double t) { return t < 0.5 ? 4 * t * t * t : 1 - std::pow(-2 * t + 2, 3) / 2; }
 
+GLint U(GLuint p, const char* n) { return glGetUniformLocation(p, n); }
+
 }  // namespace
+
+// ---------------------------------------------------------------- setup
 
 bool Renderer::surfaceCreated() {
     bool lost = hadContext_ && !gpu_.empty();
     gpu_.clear();  // old context objects are gone with the old context
     textures_.clear();
+    pickFbo_ = pickColor_ = pickDepth_ = 0;
+    pickW_ = pickH_ = 0;
     hadContext_ = true;
     buildPrograms();
     return lost;
@@ -160,9 +224,9 @@ void Renderer::buildPrograms() {
     meshProg_ = link(kMeshVs, kMeshFs);
     bgProg_ = link(kBgVs, kBgFs);
     gridProg_ = link(kGridVs, kGridFs);
+    pickProg_ = link(kPickVs, kPickFs);
     glGenVertexArrays(1, &bgVao_);
 
-    // grid: 40 cells each side, major line every 5
     const int N = 40;
     std::vector<float> g;
     for (int i = -N; i <= N; i++) {
@@ -203,12 +267,17 @@ void Renderer::clearModel() {
         glDeleteBuffers(3, b);
     }
     gpu_.clear();
-    for (auto& t : textures_) glDeleteTextures(1, &t.second);
+    std::vector<GLuint> uniq;
+    for (auto& t : textures_)
+        if (std::find(uniq.begin(), uniq.end(), t.second) == uniq.end()) uniq.push_back(t.second);
+    for (GLuint t : uniq) glDeleteTextures(1, &t);
     textures_.clear();
     std::lock_guard<std::mutex> l(mu_);
     bounds_ = Bounds();
+    parts_.clear();
+    hidden_.clear();
+    selected_ = -1;
     userMoved_ = false;
-    fitted_ = false;
     lastGen_ = -1;
 }
 
@@ -217,28 +286,26 @@ void Renderer::releaseGl() {
     if (meshProg_) glDeleteProgram(meshProg_);
     if (bgProg_) glDeleteProgram(bgProg_);
     if (gridProg_) glDeleteProgram(gridProg_);
-    meshProg_ = bgProg_ = gridProg_ = 0;
+    if (pickProg_) glDeleteProgram(pickProg_);
+    meshProg_ = bgProg_ = gridProg_ = pickProg_ = 0;
     if (bgVao_) glDeleteVertexArrays(1, &bgVao_);
     if (gridVao_) glDeleteVertexArrays(1, &gridVao_);
     if (gridVbo_) glDeleteBuffers(1, &gridVbo_);
     if (whiteTex_) glDeleteTextures(1, &whiteTex_);
-    bgVao_ = gridVao_ = gridVbo_ = whiteTex_ = 0;
+    if (pickFbo_) glDeleteFramebuffers(1, &pickFbo_);
+    if (pickColor_) glDeleteRenderbuffers(1, &pickColor_);
+    if (pickDepth_) glDeleteRenderbuffers(1, &pickDepth_);
+    bgVao_ = gridVao_ = gridVbo_ = whiteTex_ = pickFbo_ = pickColor_ = pickDepth_ = 0;
 }
 
 void Renderer::setTexture(int material, int glTex) {
-    auto it = textures_.find(material);
-    if (it != textures_.end() && it->second != (GLuint)glTex) glDeleteTextures(1, &it->second);
     textures_[material] = (GLuint)glTex;
-}
-
-void Renderer::setMaterials(const std::vector<Material>& mats) {
-    std::lock_guard<std::mutex> l(mu_);
-    materials_ = mats;
 }
 
 void Renderer::upload(std::unique_ptr<Chunk> c) {
     Gpu g;
     g.material = c->material;
+    g.part = c->part;
     g.points = c->points;
     g.vertCount = (GLsizei)c->verts.size();
     g.triCount = (GLsizei)c->tris.size();
@@ -271,6 +338,8 @@ void Renderer::upload(std::unique_ptr<Chunk> c) {
     gpu_.push_back(g);
 }
 
+// ---------------------------------------------------------------- camera
+
 Bounds Renderer::rotatedBounds(const Bounds& b) const {
     if (!b.valid() || !upZ_) return b;
     M4 m = rotX(-M_PI / 2);
@@ -284,7 +353,7 @@ Bounds Renderer::rotatedBounds(const Bounds& b) const {
     return r;
 }
 
-void Renderer::fitCamera(Cam& out, const Bounds& b) const {
+void Renderer::fitCamera(Cam& out, const Bounds& b, bool keepAngles) const {
     if (!b.valid()) return;
     V3 c((b.mn[0] + b.mx[0]) / 2, (b.mn[1] + b.mx[1]) / 2, (b.mn[2] + b.mx[2]) / 2);
     double r = V3(b.mx[0] - b.mn[0], b.mx[1] - b.mn[1], b.mx[2] - b.mn[2]).len() / 2;
@@ -294,8 +363,10 @@ void Renderer::fitCamera(Cam& out, const Bounds& b) const {
     double f = std::min(kFov, fovH);
     out.target = c;
     out.dist = r / std::sin(f / 2) * 1.06;
-    out.yaw = kDefYaw;
-    out.pitch = kDefPitch;
+    if (!keepAngles) {
+        out.yaw = kDefYaw;
+        out.pitch = kDefPitch;
+    }
 }
 
 void Renderer::setUpAxisZ(bool z) {
@@ -344,7 +415,7 @@ void Renderer::zoom(float factor) {
     Bounds rb = rotatedBounds(bounds_);
     double r = rb.valid() ? V3(rb.mx[0] - rb.mn[0], rb.mx[1] - rb.mn[1], rb.mx[2] - rb.mn[2]).len() / 2 : 1;
     if (r <= 0) r = 1;
-    cam_.dist = std::clamp(cam_.dist / factor, r * 0.015, r * 60);
+    cam_.dist = std::clamp(cam_.dist / factor, r * 0.002, r * 60);
 }
 
 void Renderer::resetView(bool animate) {
@@ -354,12 +425,58 @@ void Renderer::resetView(bool animate) {
     velYaw_ = velPitch_ = 0;
 }
 
+// ---------------------------------------------------------------- parts
+
+void Renderer::setPartHidden(int part, bool hidden) {
+    std::lock_guard<std::mutex> l(mu_);
+    if (part < 0) return;
+    if ((int)hidden_.size() <= part) hidden_.resize(part + 1, 0);
+    hidden_[part] = hidden ? 1 : 0;
+}
+
+void Renderer::setAllPartsHidden(bool hidden) {
+    std::lock_guard<std::mutex> l(mu_);
+    hidden_.assign(std::max(parts_.size(), hidden_.size()), hidden ? 1 : 0);
+}
+
+void Renderer::isolatePart(int part) {
+    std::lock_guard<std::mutex> l(mu_);
+    hidden_.assign(std::max(parts_.size(), hidden_.size()), 1);
+    if (part >= 0 && part < (int)hidden_.size()) hidden_[part] = 0;
+}
+
+void Renderer::requestPick(float x, float y) {
+    std::lock_guard<std::mutex> l(mu_);
+    pickX_ = x;
+    pickY_ = y;
+    pickPending_ = true;
+    pickResult_ = -2;
+}
+
+// ---------------------------------------------------------------- frame
+
+Renderer::Frame Renderer::frameState() {
+    Frame f;
+    f.cam = cam_;
+    f.mode = mode_;
+    f.th = theme_;
+    f.grid = grid_;
+    f.rb = rotatedBounds(bounds_);
+    f.pointScale = pointScale_;
+    f.pointMode = pointMode_;
+    f.lighting = lighting_;
+    f.upZ = upZ_;
+    f.selected = selected_;
+    f.hidden = hidden_;
+    f.mats = materials_;
+    return f;
+}
+
 bool Renderer::draw(Sink* sink, double now) {
     double dt = lastTime_ > 0 ? std::clamp(now - lastTime_, 0.0, 0.1) : 0.016;
     lastTime_ = now;
     bool more = false;
 
-    // progressive GPU upload with a per-frame time budget
     if (sink) {
         auto t0 = std::chrono::steady_clock::now();
         int n = 0;
@@ -373,14 +490,9 @@ bool Renderer::draw(Sink* sink, double now) {
         if (sink->pending() > 0) more = true;
     }
 
-    Cam cam;
-    int mode;
-    ThemeColors th;
-    bool grid;
-    Bounds rb;
-    float pointScale;
-    bool upZ;
-    std::vector<Material> mats;
+    Frame f;
+    bool doPick = false;
+    float px = 0, py = 0;
     {
         std::lock_guard<std::mutex> l(mu_);
         if (sink) {
@@ -389,20 +501,18 @@ bool Renderer::draw(Sink* sink, double now) {
                 lastGen_ = gen;
                 bounds_ = sink->bounds();
                 materials_ = sink->materials();
-                if (!userMoved_) {
-                    fitCamera(cam_, rotatedBounds(bounds_));
-                    fitted_ = true;
-                }
+                parts_ = sink->parts();
+                if (hidden_.size() < parts_.size()) hidden_.resize(parts_.size(), 0);
+                if (!userMoved_) fitCamera(cam_, rotatedBounds(bounds_));
             }
         }
-        rb = rotatedBounds(bounds_);
+        Bounds rb = rotatedBounds(bounds_);
         if (pendingReset_ && rb.valid()) {
             pendingReset_ = false;
             Cam target;
             fitCamera(target, rb);
             if (pendingAnimate_) {
                 animFrom_ = cam_;
-                // take the short way round
                 double d = std::fmod(animFrom_.yaw - target.yaw, 2 * M_PI);
                 if (d > M_PI) d -= 2 * M_PI;
                 if (d < -M_PI) d += 2 * M_PI;
@@ -413,6 +523,18 @@ bool Renderer::draw(Sink* sink, double now) {
                 cam_ = target;
             }
             userMoved_ = false;
+        }
+        if (pendingFocus_ >= 0) {
+            int pi = pendingFocus_;
+            pendingFocus_ = -1;
+            if (pi < (int)parts_.size() && parts_[pi].bounds.valid()) {
+                Cam target = cam_;
+                fitCamera(target, rotatedBounds(parts_[pi].bounds), true);
+                animFrom_ = cam_;
+                animTo_ = target;
+                animStart_ = now;
+                userMoved_ = true;
+            }
         }
         if (animStart_ >= 0) {
             double t = std::clamp((now - animStart_) / animDur_, 0.0, 1.0);
@@ -432,90 +554,115 @@ bool Renderer::draw(Sink* sink, double now) {
             velPitch_ *= k;
             more = true;
         }
-        if (autoRotate_ && animStart_ < 0) {
+        if (autoRotate_ && animStart_ < 0 && !turntable_) {
             cam_.yaw += 0.45 * dt;
             more = true;
         }
-        cam = cam_;
-        mode = mode_;
-        th = theme_;
-        grid = grid_;
-        pointScale = pointScale_;
-        upZ = upZ_;
-        mats = materials_;
+        f = frameState();
+        if (pickPending_) {
+            doPick = true;
+            pickPending_ = false;
+            px = pickX_;
+            py = pickY_;
+        }
     }
 
-    // ---- frame
-    glViewport(0, 0, w_, h_);
-    glClearColor(th.bgBottom[0], th.bgBottom[1], th.bgBottom[2], 1);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    renderScene(f, w_, h_, true, true);
+    if (doPick) {
+        renderPick(f, (int)px, h_ - 1 - (int)py);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glViewport(0, 0, w_, h_);
+    }
+    return more;
+}
+
+void Renderer::renderScene(const Frame& f, int w, int h, bool background, bool allowGrid) {
+    const ThemeColors& th = f.th;
+    glViewport(0, 0, w, h);
+    if (background) glClearColor(th.bgBottom[0], th.bgBottom[1], th.bgBottom[2], 1);
+    else glClearColor(0, 0, 0, 0);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     glDisable(GL_DEPTH_TEST);
     glDepthMask(GL_FALSE);
-    glUseProgram(bgProg_);
-    glUniform3fv(glGetUniformLocation(bgProg_, "uTop"), 1, th.bgTop);
-    glUniform3fv(glGetUniformLocation(bgProg_, "uBottom"), 1, th.bgBottom);
-    glUniform1f(glGetUniformLocation(bgProg_, "uAspect"), (float)w_ / (float)h_);
-    glBindVertexArray(bgVao_);
-    glDrawArrays(GL_TRIANGLES, 0, 3);
-
+    if (background) {
+        glUseProgram(bgProg_);
+        glUniform3fv(U(bgProg_, "uTop"), 1, th.bgTop);
+        glUniform3fv(U(bgProg_, "uBottom"), 1, th.bgBottom);
+        glUniform1f(U(bgProg_, "uAspect"), (float)w / (float)h);
+        glBindVertexArray(bgVao_);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+    }
+    const Bounds& rb = f.rb;
     if (!rb.valid()) {
         glBindVertexArray(0);
-        return more;
+        return;
     }
 
-    // camera, with clip planes hugging the model's bounding sphere so nothing is ever cut
     V3 center((rb.mn[0] + rb.mx[0]) / 2, (rb.mn[1] + rb.mx[1]) / 2, (rb.mn[2] + rb.mx[2]) / 2);
     double radius = V3(rb.mx[0] - rb.mn[0], rb.mx[1] - rb.mn[1], rb.mx[2] - rb.mn[2]).len() / 2;
     if (radius <= 0) radius = 1;
+    const Cam& cam = f.cam;
     V3 dir(std::cos(cam.pitch) * std::sin(cam.yaw), std::sin(cam.pitch), std::cos(cam.pitch) * std::cos(cam.yaw));
     V3 eye = cam.target + dir * cam.dist;
     M4 view = lookAt(eye, cam.target, V3(0, 1, 0));
     double dc = (eye - center).len();
-    double gridR = radius * 8.0;
-    double far = dc + std::max(radius, gridR) * 1.05;
-    double nearP = dc - radius * 1.05;
-    nearP = std::max(nearP, far * 2e-5);
-    M4 proj = perspective(kFov, (double)w_ / (double)h_, nearP, far);
-    M4 model = upZ ? rotX(-M_PI / 2) : M4::identity();
+    double far = dc + radius * 8.0 * 1.05;
+    double nearP = std::max(dc - radius * 1.05, far * 2e-5);
+    M4 proj = perspective(kFov, (double)w / (double)h, nearP, far);
+    M4 model = f.upZ ? rotX(-M_PI / 2) : M4::identity();
     M4 mv = view * model;
 
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_LEQUAL);
 
-    if (grid) {
+    if (f.grid && allowGrid) {
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        glDepthMask(GL_FALSE);
         drawGrid(view, proj, rb, th.grid);
         glDisable(GL_BLEND);
     }
     glDepthMask(GL_TRUE);
     glDisable(GL_CULL_FACE);  // double-sided: open or flipped meshes never look see-through
 
-    float fmv[16], fp[16], fn[9];
+    float fmv[16], fp[16], fm[16], fn[9];
     mv.toFloat(fmv);
     proj.toFloat(fp);
-    // normal matrix (rotation only, view is orthonormal)
+    model.toFloat(fm);
     fn[0] = fmv[0]; fn[1] = fmv[1]; fn[2] = fmv[2];
     fn[3] = fmv[4]; fn[4] = fmv[5]; fn[5] = fmv[6];
     fn[6] = fmv[8]; fn[7] = fmv[9]; fn[8] = fmv[10];
 
-    glUseProgram(meshProg_);
-    GLint uShade = glGetUniformLocation(meshProg_, "uShade");
-    GLint uKd = glGetUniformLocation(meshProg_, "uKd");
-    GLint uHasTex = glGetUniformLocation(meshProg_, "uHasTex");
-    GLint uLine = glGetUniformLocation(meshProg_, "uLine");
-    glUniformMatrix4fv(glGetUniformLocation(meshProg_, "uMV"), 1, GL_FALSE, fmv);
-    glUniformMatrix4fv(glGetUniformLocation(meshProg_, "uP"), 1, GL_FALSE, fp);
-    glUniformMatrix3fv(glGetUniformLocation(meshProg_, "uN"), 1, GL_FALSE, fn);
-    glUniform1f(glGetUniformLocation(meshProg_, "uPointSize"), pointScale);
-    glUniform3fv(glGetUniformLocation(meshProg_, "uClay"), 1, th.clay);
-    glUniform1i(glGetUniformLocation(meshProg_, "uTex"), 0);
+    const Lighting& L = kLights[std::clamp(f.lighting, 0, kLightCount - 1)];
+    const GLuint P = meshProg_;
+    glUseProgram(P);
+    GLint uShade = U(P, "uShade"), uKd = U(P, "uKd"), uHasTex = U(P, "uHasTex"), uLine = U(P, "uLine"), uSel = U(P, "uSel");
+    glUniformMatrix4fv(U(P, "uMV"), 1, GL_FALSE, fmv);
+    glUniformMatrix4fv(U(P, "uP"), 1, GL_FALSE, fp);
+    glUniformMatrix4fv(U(P, "uM"), 1, GL_FALSE, fm);
+    glUniformMatrix3fv(U(P, "uN"), 1, GL_FALSE, fn);
+    glUniform1f(U(P, "uPointSize"), f.pointScale * ((float)w / (float)std::max(1, w_)));
+    glUniform3fv(U(P, "uClay"), 1, th.clay);
+    glUniform1i(U(P, "uTex"), 0);
+    glUniform3fv(U(P, "uL1"), 1, L.l1);
+    glUniform3fv(U(P, "uC1"), 1, L.c1);
+    glUniform3fv(U(P, "uL2"), 1, L.l2);
+    glUniform3fv(U(P, "uC2"), 1, L.c2);
+    glUniform3fv(U(P, "uSky"), 1, L.sky);
+    glUniform3fv(U(P, "uGround"), 1, L.ground);
+    glUniform1f(U(P, "uSpec"), L.spec);
+    glUniform1f(U(P, "uRim"), L.rim);
+    glUniform1f(U(P, "uFlat"), L.flat);
+    glUniform3f(U(P, "uSelColor"), 1.0f, 0.62f, 0.15f);
+    glUniform1i(U(P, "uPointMode"), f.pointMode);
+    glUniform2f(U(P, "uHRange"), (float)rb.mn[1], (float)rb.mx[1]);
     glActiveTexture(GL_TEXTURE0);
 
+    int mode = f.mode;
     bool drawFill = mode != MODE_WIRE;
-    bool drawLines = mode == MODE_WIRE || mode == MODE_SOLID_WIRE || mode == MODE_TEX_WIRE;
+    bool depthOnlyFill = mode == MODE_WIRE_CLEAN;
+    bool drawLines = mode == MODE_WIRE || mode == MODE_SOLID_WIRE || mode == MODE_TEX_WIRE || mode == MODE_WIRE_CLEAN;
     bool textured = mode == MODE_TEXTURED || mode == MODE_TEX_WIRE;
 
     if (drawFill) {
@@ -523,9 +670,10 @@ bool Renderer::draw(Sink* sink, double now) {
             glEnable(GL_POLYGON_OFFSET_FILL);
             glPolygonOffset(1.0f, 1.0f);
         }
+        if (depthOnlyFill) glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
         for (auto& g : gpu_) {
-            if (g.points || !g.triCount) continue;
-            const Material* m = (g.material >= 0 && g.material < (int)mats.size()) ? &mats[g.material] : nullptr;
+            if (g.points || !g.triCount || partHidden(f, g.part)) continue;
+            const Material* m = (g.material >= 0 && g.material < (int)f.mats.size()) ? &f.mats[g.material] : nullptr;
             float kd[4] = {0.8f, 0.8f, 0.8f, 1.f};
             if (m) memcpy(kd, m->kd, sizeof kd);
             auto tx = textures_.find(g.material);
@@ -533,16 +681,19 @@ bool Renderer::draw(Sink* sink, double now) {
             glUniform1i(uShade, textured ? 0 : 1);
             glUniform4fv(uKd, 1, kd);
             glUniform1i(uHasTex, hasTex ? 1 : 0);
+            glUniform1f(uSel, g.part == f.selected ? 1.f : 0.f);
             glBindTexture(GL_TEXTURE_2D, hasTex ? tx->second : whiteTex_);
             glBindVertexArray(g.vao);
             glDrawElements(GL_TRIANGLES, g.triCount, GL_UNSIGNED_INT, nullptr);
         }
+        if (depthOnlyFill) glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         glDisable(GL_POLYGON_OFFSET_FILL);
     }
     if (drawLines) {
         float lc[4];
         memcpy(lc, th.wire, sizeof lc);
-        if (mode != MODE_WIRE) {
+        bool blend = mode == MODE_SOLID_WIRE || mode == MODE_TEX_WIRE;
+        if (blend) {
             lc[3] = 0.55f;
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -550,7 +701,8 @@ bool Renderer::draw(Sink* sink, double now) {
         glUniform1i(uShade, 2);
         glUniform4fv(uLine, 1, lc);
         for (auto& g : gpu_) {
-            if (g.points || !g.lbo) continue;
+            if (g.points || !g.lbo || partHidden(f, g.part)) continue;
+            glUniform1f(uSel, g.part == f.selected ? 1.f : 0.f);
             glBindVertexArray(g.vao);
             glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g.lbo);
             glDrawElements(GL_LINES, g.lineCount, GL_UNSIGNED_INT, nullptr);
@@ -558,19 +710,150 @@ bool Renderer::draw(Sink* sink, double now) {
         }
         glDisable(GL_BLEND);
     }
-    // point clouds
     for (auto& g : gpu_) {
-        if (!g.points) continue;
+        if (!g.points || partHidden(f, g.part)) continue;
         glUniform1i(uShade, 3);
         float kd[4] = {1, 1, 1, 1};
-        if (!textured) { kd[0] = th.clay[0]; kd[1] = th.clay[1]; kd[2] = th.clay[2]; }
-        if (mode == MODE_WIRE) memcpy(kd, th.wire, sizeof(float) * 3);
+        if (!textured || f.pointMode == 1) { kd[0] = th.clay[0]; kd[1] = th.clay[1]; kd[2] = th.clay[2]; }
+        if (mode == MODE_WIRE || mode == MODE_WIRE_CLEAN) memcpy(kd, th.wire, sizeof(float) * 3);
         glUniform4fv(uKd, 1, kd);
+        glUniform1f(uSel, g.part == f.selected ? 1.f : 0.f);
         glBindVertexArray(g.vao);
         glDrawArrays(GL_POINTS, 0, g.vertCount);
     }
     glBindVertexArray(0);
-    return more;
+}
+
+void Renderer::renderPick(const Frame& f, int x, int y) {
+    if (x < 0 || y < 0 || x >= w_ || y >= h_) { pickResult_ = -1; return; }
+    if (!pickFbo_ || pickW_ != w_ || pickH_ != h_) {
+        if (pickFbo_) glDeleteFramebuffers(1, &pickFbo_);
+        if (pickColor_) glDeleteRenderbuffers(1, &pickColor_);
+        if (pickDepth_) glDeleteRenderbuffers(1, &pickDepth_);
+        glGenFramebuffers(1, &pickFbo_);
+        glGenRenderbuffers(1, &pickColor_);
+        glGenRenderbuffers(1, &pickDepth_);
+        glBindRenderbuffer(GL_RENDERBUFFER, pickColor_);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, w_, h_);
+        glBindRenderbuffer(GL_RENDERBUFFER, pickDepth_);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, w_, h_);
+        glBindFramebuffer(GL_FRAMEBUFFER, pickFbo_);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, pickColor_);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, pickDepth_);
+        pickW_ = w_;
+        pickH_ = h_;
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, pickFbo_);
+    glViewport(0, 0, w_, h_);
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(x, y, 1, 1);
+    glClearColor(0, 0, 0, 0);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
+
+    const Bounds& rb = f.rb;
+    if (rb.valid()) {
+        V3 center((rb.mn[0] + rb.mx[0]) / 2, (rb.mn[1] + rb.mx[1]) / 2, (rb.mn[2] + rb.mx[2]) / 2);
+        double radius = V3(rb.mx[0] - rb.mn[0], rb.mx[1] - rb.mn[1], rb.mx[2] - rb.mn[2]).len() / 2;
+        if (radius <= 0) radius = 1;
+        const Cam& cam = f.cam;
+        V3 dir(std::cos(cam.pitch) * std::sin(cam.yaw), std::sin(cam.pitch), std::cos(cam.pitch) * std::cos(cam.yaw));
+        V3 eye = cam.target + dir * cam.dist;
+        M4 view = lookAt(eye, cam.target, V3(0, 1, 0));
+        double dc = (eye - center).len();
+        double far = dc + radius * 8.0 * 1.05;
+        double nearP = std::max(dc - radius * 1.05, far * 2e-5);
+        M4 proj = perspective(kFov, (double)w_ / (double)h_, nearP, far);
+        M4 mv = view * (f.upZ ? rotX(-M_PI / 2) : M4::identity());
+        float fmv[16], fp[16];
+        mv.toFloat(fmv);
+        proj.toFloat(fp);
+        glUseProgram(pickProg_);
+        glUniformMatrix4fv(U(pickProg_, "uMV"), 1, GL_FALSE, fmv);
+        glUniformMatrix4fv(U(pickProg_, "uP"), 1, GL_FALSE, fp);
+        glUniform1f(U(pickProg_, "uPointSize"), std::max(6.f, f.pointScale * 3.f));
+        GLint uId = U(pickProg_, "uId");
+        for (auto& g : gpu_) {
+            if (partHidden(f, g.part)) continue;
+            int id = g.part + 1;
+            glUniform4f(uId, (id & 255) / 255.f, ((id >> 8) & 255) / 255.f, ((id >> 16) & 255) / 255.f, 1.f);
+            glBindVertexArray(g.vao);
+            if (g.points) glDrawArrays(GL_POINTS, 0, g.vertCount);
+            else if (g.triCount) glDrawElements(GL_TRIANGLES, g.triCount, GL_UNSIGNED_INT, nullptr);
+            else if (g.lbo) {
+                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g.lbo);
+                glDrawElements(GL_LINES, g.lineCount, GL_UNSIGNED_INT, nullptr);
+                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g.ibo);
+            }
+        }
+        glBindVertexArray(0);
+    }
+    uint8_t px[4] = {0, 0, 0, 0};
+    glReadPixels(x, y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    glDisable(GL_SCISSOR_TEST);
+    int id = px[0] | (px[1] << 8) | (px[2] << 16);
+    pickResult_ = id - 1;  // -1 when nothing was hit
+}
+
+// ---------------------------------------------------------------- capture
+
+bool Renderer::snapshot(int w, int h, bool transparent, uint8_t* out) {
+    Frame f;
+    {
+        std::lock_guard<std::mutex> l(mu_);
+        f = frameState();
+        f.selected = -1;
+    }
+    GLuint fbo = 0, color = 0, depth = 0;
+    glGenFramebuffers(1, &fbo);
+    glGenRenderbuffers(1, &color);
+    glGenRenderbuffers(1, &depth);
+    glBindRenderbuffer(GL_RENDERBUFFER, color);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, w, h);
+    glBindRenderbuffer(GL_RENDERBUFFER, depth);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, w, h);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, color);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depth);
+    bool ok = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+    if (ok) {
+        renderScene(f, w, h, !transparent, !transparent);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, out);
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteRenderbuffers(1, &color);
+    glDeleteRenderbuffers(1, &depth);
+    glViewport(0, 0, w_, h_);
+    return ok;
+}
+
+void Renderer::beginTurntable() {
+    std::lock_guard<std::mutex> l(mu_);
+    turntable_ = true;
+    turnBase_ = cam_.yaw;
+    velYaw_ = velPitch_ = 0;
+    animStart_ = -1;
+}
+
+void Renderer::turntableFrame(double angle, int w, int h) {
+    Frame f;
+    {
+        std::lock_guard<std::mutex> l(mu_);
+        f = frameState();
+        f.selected = -1;
+        f.cam.yaw = turnBase_ + angle;
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    renderScene(f, w, h, true, true);
+}
+
+void Renderer::endTurntable() {
+    std::lock_guard<std::mutex> l(mu_);
+    turntable_ = false;
 }
 
 void Renderer::drawGrid(const M4& view, const M4& proj, const Bounds& rb, const float* color) {
@@ -587,11 +870,11 @@ void Renderer::drawGrid(const M4& view, const M4& proj, const Bounds& rb, const 
     float f[16];
     vp.toFloat(f);
     glUseProgram(gridProg_);
-    glUniformMatrix4fv(glGetUniformLocation(gridProg_, "uVP"), 1, GL_FALSE, f);
-    glUniform3f(glGetUniformLocation(gridProg_, "uOff"), (float)cx, (float)fy, (float)cz);
-    glUniform1f(glGetUniformLocation(gridProg_, "uSpacing"), (float)spacing);
-    glUniform1f(glGetUniformLocation(gridProg_, "uHalf"), 40.f);
-    glUniform4fv(glGetUniformLocation(gridProg_, "uColor"), 1, color);
+    glUniformMatrix4fv(U(gridProg_, "uVP"), 1, GL_FALSE, f);
+    glUniform3f(U(gridProg_, "uOff"), (float)cx, (float)fy, (float)cz);
+    glUniform1f(U(gridProg_, "uSpacing"), (float)spacing);
+    glUniform1f(U(gridProg_, "uHalf"), 40.f);
+    glUniform4fv(U(gridProg_, "uColor"), 1, color);
     glBindVertexArray(gridVao_);
     glDrawArrays(GL_LINES, 0, gridCount_);
 }

@@ -183,7 +183,7 @@ object ThumbnailGenerator {
             NativeBridge.nativeSetPointScale(h, 2f)
             NativeBridge.nativeSetTheme(h, DarkPalette.nativeTheme())
             val resolver = SiblingResolver(ctx, job.extras, job.tree, job.relPath?.substringBeforeLast('/', "")?.ifEmpty { null })
-            val err = NativeBridge.nativeLoad(h, fd, job.size, job.name, resolver)
+            val err = NativeBridge.nativeLoad(h, fd, job.size, job.name, resolver, false)
             if (err.isNotEmpty()) return false
             var frames = 0
             while (frames < 2000) {

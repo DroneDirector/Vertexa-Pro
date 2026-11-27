@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <map>
 
 #include "loaders.h"
 #include "reader.h"
@@ -204,6 +205,7 @@ std::string loadAssimp(int fd, int64_t size, const std::string& name, Sink& sink
 
     bool haveOrigin = false;
     double o[3] = {0, 0, 0};
+    std::map<std::string, int> partByName;
     for (unsigned mi = 0; mi < sc->mNumMeshes; mi++) {
         if (sink.cancel.load()) return "cancelled";
         const aiMesh* me = sc->mMeshes[mi];
@@ -215,7 +217,10 @@ std::string loadAssimp(int fd, int64_t size, const std::string& name, Sink& sink
         }
         int mat = base + (sc->mNumMaterials ? (int)me->mMaterialIndex : 0);
         bool isPoints = me->mPrimitiveTypes == aiPrimitiveType_POINT;
-        Builder b(sink, mat, isPoints);
+        std::string pname = me->mName.length ? me->mName.C_Str() : "Mesh " + std::to_string(mi + 1);
+        auto pit = partByName.find(pname);
+        int part = pit != partByName.end() ? pit->second : (partByName[pname] = sink.addPart(pname));
+        Builder b(sink, mat, isPoints, part);
         bool hn = me->HasNormals();
         auto makeV = [&](unsigned k) {
             Vertex v;

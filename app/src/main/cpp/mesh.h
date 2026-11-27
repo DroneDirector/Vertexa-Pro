@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -45,6 +46,7 @@ constexpr uint32_t kWhite = 0xFFFFFFFFu;
 
 struct Chunk {
     int material = 0;
+    int part = 0;
     bool points = false;
     std::vector<Vertex> verts;
     std::vector<uint32_t> tris;
@@ -81,6 +83,12 @@ struct Bounds {
     }
 };
 
+struct PartInfo {
+    std::string name;
+    int64_t triangles = 0, vertices = 0;
+    Bounds bounds;
+};
+
 // Callback for opening sibling files (MTL, textures, .bin). Returns fd or -1.
 struct Resolver {
     virtual ~Resolver() = default;
@@ -96,6 +104,9 @@ public:
     std::atomic<int> chunkCount{0};
     std::atomic<int> generation{0};  // increments when bounds change
 
+    // When set, chunks go to the consumer (e.g. a file exporter) instead of the GPU queue.
+    std::function<void(std::unique_ptr<Chunk>)> consumer;
+
     void push(std::unique_ptr<Chunk> c) {
         if (!c || (c->verts.empty())) return;
         Bounds b;
@@ -104,10 +115,28 @@ public:
         triangleCount += (int64_t)c->tris.size() / 3;
         if (c->points) pointCount += (int64_t)c->verts.size();
         chunkCount++;
+        {
+            std::lock_guard<std::mutex> lk(m_);
+            bounds_.add(b);
+            if (c->part >= 0 && c->part < (int)parts_.size()) {
+                PartInfo& pi = parts_[c->part];
+                pi.triangles += (int64_t)c->tris.size() / 3;
+                pi.vertices += (int64_t)c->verts.size();
+                pi.bounds.add(b);
+            }
+            if (!consumer) queue_.push_back(std::move(c));
+            generation++;
+        }
+        if (c) consumer(std::move(c));
+    }
+    int addPart(const std::string& name) {
         std::lock_guard<std::mutex> lk(m_);
-        bounds_.add(b);
-        queue_.push_back(std::move(c));
-        generation++;
+        parts_.push_back(PartInfo{name});
+        return (int)parts_.size() - 1;
+    }
+    std::vector<PartInfo> parts() {
+        std::lock_guard<std::mutex> lk(m_);
+        return parts_;
     }
     std::unique_ptr<Chunk> pop() {
         std::lock_guard<std::mutex> lk(m_);
@@ -159,6 +188,7 @@ private:
     std::deque<std::unique_ptr<Chunk>> queue_;
     std::vector<Material> materials_;
     std::vector<std::string> logs_;
+    std::vector<PartInfo> parts_;
     Bounds bounds_;
 };
 
@@ -167,8 +197,8 @@ class Builder {
 public:
     static constexpr size_t kMaxVerts = 1u << 20;
 
-    Builder(Sink& sink, int material, bool points = false)
-        : sink_(sink), material_(material), points_(points) {}
+    Builder(Sink& sink, int material, bool points = false, int part = 0)
+        : sink_(sink), material_(material), points_(points), part_(part) {}
     ~Builder() = default;
 
     // key: up to three 32-bit ids identifying a unique vertex (e.g. v/vt/vn)
@@ -230,6 +260,7 @@ private:
         if (!cur_) {
             cur_ = std::make_unique<Chunk>();
             cur_->material = material_;
+            cur_->part = part_;
             cur_->points = points_;
             cur_->verts.reserve(1 << 14);
         }
@@ -250,6 +281,7 @@ private:
     Sink& sink_;
     int material_;
     bool points_;
+    int part_;
     std::unique_ptr<Chunk> cur_;
     std::vector<Slot> table_;
     std::vector<bool> hasN_;

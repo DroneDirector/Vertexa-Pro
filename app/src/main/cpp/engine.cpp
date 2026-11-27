@@ -6,11 +6,12 @@
 #include <cstdio>
 #include <new>
 
+#include "exporter.h"
 #include "loaders.h"
 
 namespace vx {
 
-std::string Engine::load(int fd, int64_t size, const std::string& name, Resolver& res) {
+std::string Engine::load(int fd, int64_t size, const std::string& name, Resolver& res, bool splitLoose) {
     auto s = std::make_shared<Sink>();
     {
         std::lock_guard<std::mutex> l(mu_);
@@ -24,23 +25,7 @@ std::string Engine::load(int fd, int64_t size, const std::string& name, Resolver
     s->log(0, "File: " + name + (size > 0 ? " (" + std::to_string(size) + " bytes)" : " (size unknown)"));
     s->log(0, std::string("Reader: ") + (ext == "obj" ? "Vertexa streaming OBJ" : ext == "stl" ? "Vertexa streaming STL" :
                                           ext == "ply" ? "Vertexa streaming PLY" : "Assimp (" + ext + ")"));
-    std::string err;
-    try {
-        if (ext == "obj") err = loadObj(fd, size, *s, res);
-        else if (ext == "stl") err = loadStl(fd, size, *s);
-        else if (ext == "ply") err = loadPly(fd, size, *s, res);
-        else {
-            err = loadAssimp(fd, size, name, *s, res);
-            fd = -1;  // closed by the loader
-        }
-    } catch (const std::bad_alloc&) {
-        err = "The device ran out of memory while opening this model.";
-    } catch (const std::exception& e) {
-        err = e.what();
-    } catch (...) {
-        err = "Unexpected error while reading the file.";
-    }
-    if (fd >= 0) ::close(fd);
+    std::string err = runLoader(fd, size, name, *s, res, splitLoose);
     s->progress = 1.f;
     s->log(0, "Result: " + std::to_string(s->vertexCount.load()) + " vertices, " + std::to_string(s->triangleCount.load()) +
                   " triangles, " + std::to_string(s->pointCount.load()) + " points, " + std::to_string(s->materialCount()) +

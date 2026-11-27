@@ -48,7 +48,14 @@ object ViewModes {
     const val WIRE = 2
     const val SOLID_WIRE = 3
     const val TEX_WIRE = 4
+    const val WIRE_CLEAN = 5
 }
+
+data class PartUi(val index: Int, val name: String, val triangles: Long, val points: Long)
+
+/** Progress of a snapshot / video / export job shown in the viewer. */
+data class JobState(val title: String, val progress: Float, val done: Boolean = false, val message: String? = null,
+                    val result: Uri? = null, val mime: String? = null, val failed: Boolean = false)
 
 class ViewerController(
     private val context: Context,
@@ -110,11 +117,36 @@ class ViewerController(
     var upZ by mutableStateOf(Formats.defaultZUp(source.name))
         private set
 
+    // parts
+    var parts by mutableStateOf<List<PartUi>>(emptyList())
+        private set
+    var hiddenParts by mutableStateOf<Set<Int>>(emptySet())
+        private set
+    var selectedPart by mutableIntStateOf(-1)
+        private set
+    var splitLoose by mutableStateOf(false)
+        private set
+    val canSplit get() = Formats.ext(loadSource.name) == "obj"
+
+    // look
+    var lighting by mutableIntStateOf(0)
+        private set
+    var pointSize by mutableFloatStateOf(2f)
+        private set
+    var pointColorMode by mutableIntStateOf(0)
+        private set
+
+    // snapshot / video / export
+    var job by mutableStateOf<JobState?>(null)
+    val isArchive get() = loadSource.uri != source.uri
+    val loadedName get() = loadSource.name
+
     init {
         NativeBridge.nativeSetMode(handle, mode)
         NativeBridge.nativeSetGrid(handle, grid)
         NativeBridge.nativeSetUpAxisZ(handle, upZ)
-        NativeBridge.nativeSetPointScale(handle, (context.resources.displayMetrics.density * 1.6f).coerceIn(1.5f, 6f))
+        pointSize = (context.resources.displayMetrics.density * 1.6f).coerceIn(1.5f, 6f)
+        NativeBridge.nativeSetPointScale(handle, pointSize)
         NativeBridge.nativeSetTheme(handle, palette.nativeTheme())
     }
 
@@ -196,7 +228,7 @@ class ViewerController(
             }
         }
         val err = withContext(Dispatchers.IO) {
-            NativeBridge.nativeLoad(handle, fd, loadSource.size, loadSource.name, resolver)
+            NativeBridge.nativeLoad(handle, fd, loadSource.size, loadSource.name, resolver, splitLoose)
         }
         poll.cancel()
         refreshStats()
@@ -229,7 +261,17 @@ class ViewerController(
         }
     }
 
+    private fun refreshParts() {
+        val names = safe { NativeBridge.nativeParts(handle) } ?: return
+        val tris = safe { NativeBridge.nativePartTriangles(handle) } ?: return
+        parts = names.indices.mapNotNull { i ->
+            val t = tris.getOrElse(i) { 0L }
+            if (t == 0L) null else PartUi(i, names[i], if (t > 0) t else 0, if (t < 0) -t else 0)
+        }
+    }
+
     private fun refreshStats() {
+        refreshParts()
         val s = safe { NativeBridge.nativeStats(handle) } ?: return
         val b = safe { NativeBridge.nativeBounds(handle) } ?: DoubleArray(6)
         progress = safe { NativeBridge.nativeProgress(handle) } ?: progress
@@ -399,6 +441,182 @@ class ViewerController(
         safe { NativeBridge.nativeSetTheme(handle, p.nativeTheme()) }
         view?.requestRender()
     }
+
+    // ---------------------------------------------------------------- parts
+    fun pick(x: Float, y: Float) {
+        safe { NativeBridge.nativeRequestPick(handle, x, y) }
+        view?.requestRender()
+        scope.launch {
+            repeat(40) {
+                delay(16)
+                val r = safe { NativeBridge.nativePickResult(handle) } ?: return@launch
+                if (r != -2) {
+                    selectPart(if (r >= 0 && parts.any { it.index == r }) r else -1)
+                    return@launch
+                }
+            }
+        }
+    }
+
+    fun selectPart(i: Int) {
+        selectedPart = i
+        safe { NativeBridge.nativeSelectPart(handle, i) }
+        view?.requestRender()
+    }
+
+    fun setPartVisible(i: Int, visible: Boolean) {
+        hiddenParts = if (visible) hiddenParts - i else hiddenParts + i
+        safe { NativeBridge.nativeSetPartHidden(handle, i, !visible) }
+        if (!visible && selectedPart == i) selectPart(-1)
+        view?.requestRender()
+    }
+
+    fun showAllParts() {
+        hiddenParts = emptySet()
+        safe { NativeBridge.nativeSetAllPartsHidden(handle, false) }
+        view?.requestRender()
+    }
+
+    fun hideAllParts() {
+        hiddenParts = parts.map { it.index }.toSet()
+        safe { NativeBridge.nativeSetAllPartsHidden(handle, true) }
+        selectPart(-1)
+    }
+
+    fun isolatePart(i: Int) {
+        hiddenParts = parts.map { it.index }.filter { it != i }.toSet()
+        safe { NativeBridge.nativeIsolatePart(handle, i) }
+        view?.requestRender()
+    }
+
+    fun focusPart(i: Int) {
+        safe { NativeBridge.nativeFocusPart(handle, i) }
+        view?.requestRender()
+    }
+
+    /** Reloads the model with every unconnected piece as its own part (OBJ). */
+    fun updateSplit(on: Boolean) {
+        if (on == splitLoose) return
+        splitLoose = on
+        hiddenParts = emptySet()
+        selectedPart = -1
+        parts = emptyList()
+        textureJob?.cancel()
+        val v = view
+        if (v != null) v.queueEvent { safe { NativeBridge.nativeClearModel(handle) }; scope.launch { start() } }
+        else start()
+    }
+
+    // ---------------------------------------------------------------- look
+    fun updateLighting(p: Int) {
+        lighting = p
+        safe { NativeBridge.nativeSetLighting(handle, p) }
+        view?.requestRender()
+    }
+
+    fun updatePointSize(s: Float) {
+        pointSize = s
+        safe { NativeBridge.nativeSetPointScale(handle, s) }
+        view?.requestRender()
+    }
+
+    fun updatePointColorMode(m: Int) {
+        pointColorMode = m
+        safe { NativeBridge.nativeSetPointColorMode(handle, m) }
+        view?.requestRender()
+    }
+
+    // ---------------------------------------------------------------- snapshot & turntable
+    fun snapshot(transparent: Boolean) {
+        val v = view ?: return
+        val w0 = surfaceW
+        val h0 = surfaceH
+        if (w0 <= 0 || h0 <= 0) return
+        job = JobState("Saving snapshot", 0.3f)
+        val scale = minOf(2f, 4096f / maxOf(w0, h0))
+        val w = (w0 * scale).toInt()
+        val h = (h0 * scale).toInt()
+        v.queueEvent {
+            val buf = java.nio.ByteBuffer.allocateDirect(w * h * 4).order(java.nio.ByteOrder.nativeOrder())
+            val ok = safe { NativeBridge.nativeSnapshot(handle, w, h, transparent, buf) } ?: false
+            scope.launch {
+                if (!ok) { job = JobState("Snapshot", 1f, true, "The snapshot could not be rendered.", failed = true); return@launch }
+                val uri = withContext(Dispatchers.IO) {
+                    runCatching {
+                        val bmp = Capture.fromGl(buf, w, h, w0, h0)
+                        Capture.savePng(context, bmp, Capture.baseName(source.name))
+                    }.getOrNull()
+                }
+                job = if (uri != null) JobState("Snapshot saved", 1f, true, "Saved to Pictures/Vertexa Pro", uri, "image/png")
+                else JobState("Snapshot", 1f, true, "The snapshot could not be saved.", failed = true)
+            }
+        }
+        v.requestRender()
+    }
+
+    fun recordTurntable() {
+        val v = view ?: return
+        job = JobState("Recording turntable", 0f)
+        val out = java.io.File(context.cacheDir, "turntable.mp4")
+        v.queueEvent {
+            val ok = safe {
+                Capture.recordTurntable(handle, out) { f -> scope.launch { job = JobState("Recording turntable", f) } }
+            } ?: false
+            scope.launch {
+                if (!ok) {
+                    job = JobState("Turntable", 1f, true, "This device couldn't record the video.", failed = true)
+                    return@launch
+                }
+                val uri = withContext(Dispatchers.IO) { runCatching { Capture.saveVideo(context, out, Capture.baseName(source.name)) }.getOrNull() }
+                job = if (uri != null) JobState("Video saved", 1f, true, "Saved to Movies/Vertexa Pro", uri, "video/mp4")
+                else JobState("Turntable", 1f, true, "The video could not be saved.", failed = true)
+            }
+            view?.requestRender()
+        }
+        v.requestRender()
+    }
+
+    // ---------------------------------------------------------------- export
+    fun export(tree: Uri, format: Int, visibleOnly: Boolean) {
+        job = JobState("Saving ${if (format == 0) "OBJ" else "STL"}", 0f)
+        val namesByMat = safe { NativeBridge.nativeMaterialTextures(handle) } ?: emptyArray()
+        val hidden = BooleanArray((parts.maxOfOrNull { it.index } ?: -1) + 1) { visibleOnly && it in hiddenParts }
+        val poll = scope.launch {
+            while (true) {
+                delay(120)
+                val p = safe { NativeBridge.nativeExportProgress(handle) } ?: break
+                job = job?.copy(progress = p)
+            }
+        }
+        scope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    Exporter.export(context, handle, tree, loadSource, resolver, format, hidden, namesByMat, splitLoose)
+                }
+            }
+            poll.cancel()
+            job = result.fold(
+                { msg -> JobState("Saved", 1f, true, msg) },
+                { e -> JobState("Export", 1f, true, e.message ?: "The export failed.", failed = true) },
+            )
+        }
+    }
+
+    fun extractArchive(tree: Uri) {
+        job = JobState("Extracting files", 0f)
+        scope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching { Exporter.extract(context, loadSource, tree) { f -> scope.launch { job = job?.copy(progress = f) } } }
+            }
+            job = result.fold(
+                { n -> JobState("Extracted", 1f, true, "$n files saved to the chosen folder") },
+                { e -> JobState("Extract", 1f, true, e.message ?: "Extracting failed.", failed = true) },
+            )
+        }
+    }
+
+    fun cancelExport() { safe { NativeBridge.nativeExportCancel(handle) } }
+    fun dismissJob() { job = null }
 
     fun cancel() {
         safe { NativeBridge.nativeCancel(handle) }

@@ -3,6 +3,7 @@
 #include <string>
 
 #include "engine.h"
+#include "exporter.h"
 
 using namespace vx;
 
@@ -66,14 +67,80 @@ JNIEXPORT jlong JNICALL FN(nativeCreate)(JNIEnv*, jobject) { return reinterpret_
 JNIEXPORT void JNICALL FN(nativeDestroy)(JNIEnv*, jobject, jlong h) { delete E(h); }
 
 JNIEXPORT jstring JNICALL FN(nativeLoad)(JNIEnv* env, jobject, jlong h, jint fd, jlong size, jstring name,
-                                         jobject resolver) {
+                                         jobject resolver, jboolean split) {
     const char* n = env->GetStringUTFChars(name, nullptr);
     std::string nm(n);
     env->ReleaseStringUTFChars(name, n);
     JniResolver res(env, resolver);
-    std::string err = E(h)->load(fd, size, nm, res);
+    std::string err = E(h)->load(fd, size, nm, res, split);
     return env->NewStringUTF(safeUtf8(err).c_str());
 }
+
+JNIEXPORT jobjectArray JNICALL FN(nativeParts)(JNIEnv* env, jobject, jlong h) {
+    auto s = E(h)->sink();
+    std::vector<PartInfo> parts;
+    if (s) parts = s->parts();
+    jclass sc = env->FindClass("java/lang/String");
+    jobjectArray arr = env->NewObjectArray((jsize)parts.size(), sc, nullptr);
+    for (size_t i = 0; i < parts.size(); i++) {
+        jstring js = env->NewStringUTF(safeUtf8(parts[i].name).c_str());
+        env->SetObjectArrayElement(arr, (jsize)i, js);
+        env->DeleteLocalRef(js);
+    }
+    return arr;
+}
+
+JNIEXPORT jlongArray JNICALL FN(nativePartTriangles)(JNIEnv* env, jobject, jlong h) {
+    auto s = E(h)->sink();
+    std::vector<PartInfo> parts;
+    if (s) parts = s->parts();
+    std::vector<jlong> v(parts.size());
+    for (size_t i = 0; i < parts.size(); i++) v[i] = parts[i].triangles > 0 ? parts[i].triangles : -parts[i].vertices;
+    jlongArray a = env->NewLongArray((jsize)v.size());
+    env->SetLongArrayRegion(a, 0, (jsize)v.size(), v.data());
+    return a;
+}
+
+JNIEXPORT jstring JNICALL FN(nativeExport)(JNIEnv* env, jobject, jlong h, jint inFd, jlong size, jstring name,
+                                           jobject resolver, jint format, jint outFd, jint mtlFd, jstring mtlName,
+                                           jbooleanArray hidden, jobjectArray textures, jboolean split) {
+    auto str = [&](jstring js) {
+        if (!js) return std::string();
+        const char* c = env->GetStringUTFChars(js, nullptr);
+        std::string r(c);
+        env->ReleaseStringUTFChars(js, c);
+        return r;
+    };
+    ExportOptions opt;
+    opt.format = format;
+    opt.outFd = outFd;
+    opt.mtlFd = mtlFd;
+    opt.mtlName = str(mtlName);
+    opt.splitLoose = split;
+    if (hidden) {
+        jsize n = env->GetArrayLength(hidden);
+        std::vector<jboolean> b(n);
+        if (n) env->GetBooleanArrayRegion(hidden, 0, n, b.data());
+        for (auto x : b) opt.hidden.push_back(x ? 1 : 0);
+    }
+    if (textures) {
+        jsize n = env->GetArrayLength(textures);
+        for (jsize i = 0; i < n; i++) {
+            auto js = (jstring)env->GetObjectArrayElement(textures, i);
+            opt.textures.push_back(str(js));
+            if (js) env->DeleteLocalRef(js);
+        }
+    }
+    JniResolver res(env, resolver);
+    Engine* e = E(h);
+    e->exportProgress = 0.f;
+    e->exportCancel = false;
+    std::string err = exportModel(inFd, size, str(name), res, opt, e->exportProgress, e->exportCancel);
+    return env->NewStringUTF(safeUtf8(err).c_str());
+}
+
+JNIEXPORT jfloat JNICALL FN(nativeExportProgress)(JNIEnv*, jobject, jlong h) { return E(h)->exportProgress.load(); }
+JNIEXPORT void JNICALL FN(nativeExportCancel)(JNIEnv*, jobject, jlong h) { E(h)->exportCancel = true; }
 
 JNIEXPORT void JNICALL FN(nativeCancel)(JNIEnv*, jobject, jlong h) { E(h)->cancel(); }
 
@@ -176,6 +243,17 @@ JNIEXPORT void JNICALL FN(nativeClearModel)(JNIEnv*, jobject, jlong h) {
     E(h)->resetSink();
     E(h)->renderer.clearModel();
 }
+JNIEXPORT jboolean JNICALL FN(nativeSnapshot)(JNIEnv* env, jobject, jlong h, jint w, jint hh, jboolean transparent,
+                                               jobject buffer) {
+    auto* out = (uint8_t*)env->GetDirectBufferAddress(buffer);
+    if (!out || env->GetDirectBufferCapacity(buffer) < (jlong)w * hh * 4) return JNI_FALSE;
+    return E(h)->renderer.snapshot(w, hh, transparent, out) ? JNI_TRUE : JNI_FALSE;
+}
+JNIEXPORT void JNICALL FN(nativeBeginTurntable)(JNIEnv*, jobject, jlong h) { E(h)->renderer.beginTurntable(); }
+JNIEXPORT void JNICALL FN(nativeTurntableFrame)(JNIEnv*, jobject, jlong h, jdouble a, jint w, jint hh) {
+    E(h)->renderer.turntableFrame(a, w, hh);
+}
+JNIEXPORT void JNICALL FN(nativeEndTurntable)(JNIEnv*, jobject, jlong h) { E(h)->renderer.endTurntable(); }
 JNIEXPORT void JNICALL FN(nativeReleaseGl)(JNIEnv*, jobject, jlong h) { E(h)->renderer.releaseGl(); }
 JNIEXPORT void JNICALL FN(nativeSetTexture)(JNIEnv*, jobject, jlong h, jint mat, jint tex) {
     E(h)->renderer.setTexture(mat, tex);
@@ -203,6 +281,15 @@ JNIEXPORT void JNICALL FN(nativeSetTheme)(JNIEnv* env, jobject, jlong h, jfloatA
     memcpy(t.clay, f + 14, 12);
     E(h)->renderer.setTheme(t);
 }
+JNIEXPORT void JNICALL FN(nativeSetPointColorMode)(JNIEnv*, jobject, jlong h, jint m) { E(h)->renderer.setPointColorMode(m); }
+JNIEXPORT void JNICALL FN(nativeSetLighting)(JNIEnv*, jobject, jlong h, jint p) { E(h)->renderer.setLighting(p); }
+JNIEXPORT void JNICALL FN(nativeSetPartHidden)(JNIEnv*, jobject, jlong h, jint i, jboolean b) { E(h)->renderer.setPartHidden(i, b); }
+JNIEXPORT void JNICALL FN(nativeSetAllPartsHidden)(JNIEnv*, jobject, jlong h, jboolean b) { E(h)->renderer.setAllPartsHidden(b); }
+JNIEXPORT void JNICALL FN(nativeIsolatePart)(JNIEnv*, jobject, jlong h, jint i) { E(h)->renderer.isolatePart(i); }
+JNIEXPORT void JNICALL FN(nativeSelectPart)(JNIEnv*, jobject, jlong h, jint i) { E(h)->renderer.selectPart(i); }
+JNIEXPORT void JNICALL FN(nativeFocusPart)(JNIEnv*, jobject, jlong h, jint i) { E(h)->renderer.focusPart(i); }
+JNIEXPORT void JNICALL FN(nativeRequestPick)(JNIEnv*, jobject, jlong h, jfloat x, jfloat y) { E(h)->renderer.requestPick(x, y); }
+JNIEXPORT jint JNICALL FN(nativePickResult)(JNIEnv*, jobject, jlong h) { return E(h)->renderer.pickResult(); }
 JNIEXPORT void JNICALL FN(nativeTouchDown)(JNIEnv*, jobject, jlong h) { E(h)->renderer.touchDown(); }
 JNIEXPORT void JNICALL FN(nativeOrbit)(JNIEnv*, jobject, jlong h, jfloat dx, jfloat dy) { E(h)->renderer.orbit(dx, dy); }
 JNIEXPORT void JNICALL FN(nativePan)(JNIEnv*, jobject, jlong h, jfloat dx, jfloat dy) { E(h)->renderer.pan(dx, dy); }

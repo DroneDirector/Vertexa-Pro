@@ -28,6 +28,11 @@ class ModelSurfaceView(context: Context, private val controller: ViewerControlle
             controller.resetView()
             return true
         }
+
+        override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+            controller.pick(e.x, e.y)
+            return true
+        }
     })
 
     init {
@@ -127,7 +132,13 @@ class ModelSurfaceView(context: Context, private val controller: ViewerControlle
     private class MultisampleConfigChooser : GLSurfaceView.EGLConfigChooser {
         override fun chooseConfig(egl: EGL10, display: EGLDisplay): EGLConfig {
             val es3 = 0x40 // EGL_OPENGL_ES3_BIT_KHR
+            val rec = 0x3142 // EGL_RECORDABLE_ANDROID: lets the turntable recorder draw into the video encoder
             val attempts = listOf(
+                intArrayOf(EGL10.EGL_RED_SIZE, 8, EGL10.EGL_GREEN_SIZE, 8, EGL10.EGL_BLUE_SIZE, 8,
+                    EGL10.EGL_DEPTH_SIZE, 24, EGL10.EGL_RENDERABLE_TYPE, es3,
+                    EGL10.EGL_SAMPLE_BUFFERS, 1, EGL10.EGL_SAMPLES, 4, rec, 1, EGL10.EGL_NONE),
+                intArrayOf(EGL10.EGL_RED_SIZE, 8, EGL10.EGL_GREEN_SIZE, 8, EGL10.EGL_BLUE_SIZE, 8,
+                    EGL10.EGL_DEPTH_SIZE, 24, EGL10.EGL_RENDERABLE_TYPE, es3, rec, 1, EGL10.EGL_NONE),
                 intArrayOf(EGL10.EGL_RED_SIZE, 8, EGL10.EGL_GREEN_SIZE, 8, EGL10.EGL_BLUE_SIZE, 8,
                     EGL10.EGL_DEPTH_SIZE, 24, EGL10.EGL_RENDERABLE_TYPE, es3,
                     EGL10.EGL_SAMPLE_BUFFERS, 1, EGL10.EGL_SAMPLES, 4, EGL10.EGL_NONE),

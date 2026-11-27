@@ -3,6 +3,8 @@
 // Everything unusual is written to the load report so problems can be tracked down.
 #include <unistd.h>
 
+#include <algorithm>
+#include <functional>
 #include <map>
 #include <unordered_map>
 
@@ -106,7 +108,7 @@ enum FaceResult { FACE_OK, FACE_DEFER, FACE_FEW, FACE_BAD };
 
 }  // namespace
 
-std::string loadObj(int fd, int64_t size, Sink& sink, Resolver& res) {
+std::string loadObj(int fd, int64_t size, Sink& sink, Resolver& res, bool splitLoose) {
     FdReader r(fd, size, &sink, true);
     {
         unsigned char m[4] = {0, 0, 0, 0};
@@ -125,13 +127,28 @@ std::string loadObj(int fd, int64_t size, Sink& sink, Resolver& res) {
     Material def;
     def.name = "default";
     int defMat = sink.addMaterial(def);
-    std::map<int, std::unique_ptr<Builder>> builders;
-    auto builderFor = [&](int mat) -> Builder& {
-        auto& b = builders[mat];
-        if (!b) b = std::make_unique<Builder>(sink, mat);
+    // ---- parts: one per "o"/"g" name (or one for the whole file)
+    std::unordered_map<std::string, int> partByName;
+    int curPart = -1;
+    auto partIndex = [&](const std::string& name) {
+        auto it = partByName.find(name);
+        if (it != partByName.end()) return it->second;
+        int pi = sink.addPart(name);
+        partByName[name] = pi;
+        return pi;
+    };
+    auto ensurePart = [&]() {
+        if (curPart < 0) curPart = partIndex("Model");
+        return curPart;
+    };
+    std::map<int64_t, std::unique_ptr<Builder>> builders;
+    auto builderFor = [&](int mat, int part) -> Builder& {
+        auto& b = builders[((int64_t)mat << 32) | (uint32_t)part];
+        if (!b) b = std::make_unique<Builder>(sink, mat, false, part);
         return *b;
     };
-    Builder* cur = &builderFor(defMat);
+    // split mode keeps faces until the end: [corners, material, part, (v, t, n) * corners]
+    std::vector<uint32_t> stored;
 
     // ---- diagnostics
     int64_t nV = 0, nVt = 0, nVn = 0, nF = 0, nL = 0, nUse = 0, nP = 0;
@@ -149,6 +166,31 @@ std::string loadObj(int fd, int64_t size, Sink& sink, Resolver& res) {
     std::vector<uint32_t> idx;
     std::vector<std::pair<size_t, std::string>> deferred;  // faces that point at vertices defined later
     size_t lineNo = 0;
+
+    auto emitFace = [&](int mat, int part) {
+        if (face.size() > 4) polys++;
+        Builder* b = &builderFor(mat, part);
+        b->reserveFace(face.size());
+        idx.clear();
+        for (auto& rf : face) {
+            Vertex v;
+            size_t pi = (size_t)(rf.v - 1) * 3;
+            v.p[0] = pos[pi]; v.p[1] = pos[pi + 1]; v.p[2] = pos[pi + 2];
+            bool hn = rf.n > 0;
+            if (hn) {
+                size_t ni = (size_t)(rf.n - 1) * 3;
+                v.n = packNormal(nrm[ni], nrm[ni + 1], nrm[ni + 2]);
+            } else v.n = packNormal(0, 1, 0);
+            if (rf.t > 0) {
+                size_t ti = (size_t)(rf.t - 1) * 2;
+                v.uv[0] = uv[ti]; v.uv[1] = uv[ti + 1];
+            } else { v.uv[0] = 0; v.uv[1] = 0; }
+            v.c = ((size_t)(rf.v - 1) < col.size()) ? col[rf.v - 1] : kWhite;
+            idx.push_back(b->vertex((uint32_t)rf.v, (uint32_t)rf.t, (uint32_t)rf.n, v, hn));
+        }
+        for (size_t k = 1; k + 1 < idx.size(); k++) b->tri(idx[0], idx[k], idx[k + 1]);
+        for (size_t k = 0; k < idx.size(); k++) b->line(idx[k], idx[(k + 1) % idx.size()]);
+    };
 
     // Parses one face line. final=true: no more vertices will come.
     auto doFace = [&](const char* p, bool final, int mat) -> FaceResult {
@@ -182,28 +224,19 @@ std::string loadObj(int fd, int64_t size, Sink& sink, Resolver& res) {
         if (future) return FACE_DEFER;
         if (corners > maxCorners) maxCorners = corners;
         if (face.size() < 3) return corners >= 3 ? FACE_BAD : FACE_FEW;
-        if (face.size() > 4) polys++;
-        Builder* b = &builderFor(mat);
-        b->reserveFace(face.size());
-        idx.clear();
-        for (auto& rf : face) {
-            Vertex v;
-            size_t pi = (size_t)(rf.v - 1) * 3;
-            v.p[0] = pos[pi]; v.p[1] = pos[pi + 1]; v.p[2] = pos[pi + 2];
-            bool hn = rf.n > 0;
-            if (hn) {
-                size_t ni = (size_t)(rf.n - 1) * 3;
-                v.n = packNormal(nrm[ni], nrm[ni + 1], nrm[ni + 2]);
-            } else v.n = packNormal(0, 1, 0);
-            if (rf.t > 0) {
-                size_t ti = (size_t)(rf.t - 1) * 2;
-                v.uv[0] = uv[ti]; v.uv[1] = uv[ti + 1];
-            } else { v.uv[0] = 0; v.uv[1] = 0; }
-            v.c = ((size_t)(rf.v - 1) < col.size()) ? col[rf.v - 1] : kWhite;
-            idx.push_back(b->vertex((uint32_t)rf.v, (uint32_t)rf.t, (uint32_t)rf.n, v, hn));
+        int part = ensurePart();
+        if (splitLoose) {
+            stored.push_back((uint32_t)face.size());
+            stored.push_back((uint32_t)mat);
+            stored.push_back((uint32_t)part);
+            for (auto& rf : face) {
+                stored.push_back((uint32_t)rf.v);
+                stored.push_back((uint32_t)rf.t);
+                stored.push_back((uint32_t)rf.n);
+            }
+        } else {
+            emitFace(mat, part);
         }
-        for (size_t k = 1; k + 1 < idx.size(); k++) b->tri(idx[0], idx[k], idx[k + 1]);
-        for (size_t k = 0; k < idx.size(); k++) b->line(idx[k], idx[(k + 1) % idx.size()]);
         return FACE_OK;
     };
     int curMat = defMat;
@@ -280,6 +313,7 @@ std::string loadObj(int fd, int64_t size, Sink& sink, Resolver& res) {
                 if (v >= 1 && v <= nv) vs.push_back(v);
             }
             if (vs.size() < 2) continue;
+            Builder* cur = &builderFor(curMat, ensurePart());
             cur->reserveFace(vs.size());
             uint32_t prev = UINT32_MAX;
             for (long v : vs) {
@@ -303,7 +337,6 @@ std::string loadObj(int fd, int64_t size, Sink& sink, Resolver& res) {
                 mi = sink.addMaterial(m);
                 matByName[name] = mi;
             } else mi = it->second;
-            cur = &builderFor(mi);
             curMat = mi;
         } else if (!strncmp(s, "mtllib", 6)) {
             std::string files = trim(s + 6);
@@ -326,11 +359,15 @@ std::string loadObj(int fd, int64_t size, Sink& sink, Resolver& res) {
                 if (mfd >= 0) parseMtl(mfd, n, sink, matByName);
                 else sink.log(1, "Material file \"" + n + "\" was not found. Pick it together with the model, or open the model from its folder, to get materials and textures.");
             }
+        } else if ((c0 == 'o' || c0 == 'g') && (s[1] == ' ' || s[1] == '\t')) {
+            std::string name = trim(s + 2);
+            if (name.empty()) name = c0 == 'o' ? "Object" : "Group";
+            curPart = partIndex(name);
         } else if (c0 == 'p' && (s[1] == ' ' || s[1] == '\t')) {
             nP++;
         } else {
             // known harmless statements
-            static const char* ok[] = {"o", "g", "s", "vp", "cstype", "deg", "curv", "curv2", "surf", "parm",
+            static const char* ok[] = {"s", "vp", "cstype", "deg", "curv", "curv2", "surf", "parm",
                                        "trim", "hole", "scrv", "sp", "end", "con", "mg", "bevel", "c_interp",
                                        "d_interp", "lod", "shadow_obj", "trace_obj", "ctech", "stech", "call", "csh"};
             std::string kw;
@@ -358,6 +395,83 @@ std::string loadObj(int fd, int64_t size, Sink& sink, Resolver& res) {
         }
         deferred.clear();
     }
+    if (splitLoose && !stored.empty()) {
+        // union-find over vertex positions: faces sharing a vertex belong to the same piece
+        size_t nv = pos.size() / 3;
+        std::vector<uint32_t> parent(nv + 1);
+        for (size_t i = 0; i <= nv; i++) parent[i] = (uint32_t)i;
+        std::function<uint32_t(uint32_t)> find = [&](uint32_t x) {
+            while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+            return x;
+        };
+        auto valid = [&](uint32_t v) { return v >= 1 && v <= nv; };
+        for (size_t i = 0; i < stored.size();) {
+            uint32_t n = stored[i];
+            const uint32_t* rv = &stored[i + 3];
+            uint32_t a = 0;
+            for (uint32_t k = 0; k < n; k++) {
+                uint32_t v = rv[k * 3];
+                if (!valid(v)) continue;
+                if (!a) { a = v; continue; }
+                uint32_t ra = find(a), rb = find(v);
+                if (ra != rb) parent[rb] = ra;
+            }
+            i += 3 + n * 3;
+        }
+        // triangle counts per (original part, piece)
+        std::map<std::pair<uint32_t, uint32_t>, int64_t> pieceTris;
+        int64_t totalTris = 0;
+        for (size_t i = 0; i < stored.size();) {
+            uint32_t n = stored[i];
+            uint32_t v0 = stored[i + 3];
+            if (valid(v0)) {
+                pieceTris[{stored[i + 2], find(v0)}] += n - 2;
+                totalTris += n - 2;
+            }
+            i += 3 + n * 3;
+        }
+        // biggest pieces get their own part, tiny leftovers are grouped
+        std::vector<std::pair<int64_t, std::pair<uint32_t, uint32_t>>> order;
+        for (auto& kv : pieceTris) order.push_back({kv.second, kv.first});
+        std::sort(order.begin(), order.end(), [](auto& a, auto& b) { return a.first > b.first; });
+        int64_t minTris = std::max<int64_t>(4, totalTris / 20000);
+        std::vector<PartInfo> orig = sink.parts();
+        std::map<std::pair<uint32_t, uint32_t>, int> pieceToPart;
+        std::map<uint32_t, int> smallPart, pieceNo;
+        int made = 0;
+        for (auto& o : order) {
+            uint32_t op = o.second.first;
+            std::string base = op < orig.size() ? orig[op].name : "Model";
+            if (o.first >= minTris && made < 600) {
+                int no = ++pieceNo[op];
+                pieceToPart[o.second] = sink.addPart(base + " · piece " + std::to_string(no));
+                made++;
+            } else {
+                auto it = smallPart.find(op);
+                if (it == smallPart.end()) it = smallPart.emplace(op, sink.addPart(base + " · small pieces")).first;
+                pieceToPart[o.second] = it->second;
+            }
+        }
+        sink.log(0, "Split into loose parts: " + std::to_string(order.size()) + " separate pieces found, " +
+                        std::to_string(made) + " shown as their own part" +
+                        (smallPart.empty() ? "." : ", tiny pieces grouped together."));
+        for (size_t i = 0; i < stored.size();) {
+            uint32_t n = stored[i];
+            int mat = (int)stored[i + 1];
+            uint32_t op = stored[i + 2];
+            face.clear();
+            bool ok = true;
+            for (uint32_t k = 0; k < n; k++) {
+                Ref rf{(long)stored[i + 3 + k * 3], (long)stored[i + 4 + k * 3], (long)stored[i + 5 + k * 3]};
+                if (!valid((uint32_t)rf.v)) { ok = false; break; }
+                face.push_back(rf);
+            }
+            if (ok) emitFace(mat, pieceToPart[{op, find((uint32_t)face[0].v)}]);
+            i += 3 + n * 3;
+        }
+        stored.clear();
+        stored.shrink_to_fit();
+    }
     for (auto& kv : builders) kv.second->flush();
 
     // ---- report
@@ -367,6 +481,7 @@ std::string loadObj(int fd, int64_t size, Sink& sink, Resolver& res) {
     sink.log(0, "Faces (f): " + std::to_string(nF) + (nL ? " · lines (l): " + std::to_string(nL) : "") +
                     (nP ? " · points (p): " + std::to_string(nP) : "") + " · material switches: " + std::to_string(nUse));
     if (maxCorners > 4) sink.log(0, std::to_string(polys) + " faces have more than 4 corners (largest: " + std::to_string(maxCorners) + "); they were split into triangles.");
+    sink.log(0, "Parts (o/g groups): " + std::to_string(partByName.size()));
     if (r.hadBom() && !r.utf16()) sink.log(0, "File starts with a UTF-8 byte-order mark (ignored).");
     if (r.utf16()) sink.log(1, "The file is saved as UTF-16 text instead of plain text; it was converted while reading.");
     if (r.crOnly()) sink.log(1, "The file uses old Mac line endings (CR only); they were converted while reading.");
@@ -396,7 +511,7 @@ std::string loadObj(int fd, int64_t size, Sink& sink, Resolver& res) {
 
     if (sink.vertexCount.load() == 0) {
         if (!pos.empty()) {
-            Builder pb(sink, defMat, true);
+            Builder pb(sink, defMat, true, ensurePart());
             size_t n = pos.size() / 3;
             for (size_t i = 0; i < n; i++) {
                 pb.reserveFace(1);

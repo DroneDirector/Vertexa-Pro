@@ -149,6 +149,7 @@ std::string loadPly(int fd, int64_t size, Sink& sink, Resolver& res) {
     m.name = "PLY";
     m.texture = textureFile;
     int mat = sink.addMaterial(m);
+    int part = sink.addPart("Model");
     Values val(r, fmt);
 
     std::vector<Vertex> verts;
@@ -157,7 +158,7 @@ std::string loadPly(int fd, int64_t size, Sink& sink, Resolver& res) {
     bool haveOrigin = false;
     double o[3] = {0, 0, 0};
     std::unique_ptr<Builder> points;
-    if (faceCount == 0) points = std::make_unique<Builder>(sink, mat, true);
+    if (faceCount == 0) points = std::make_unique<Builder>(sink, mat, true, part);
     std::unique_ptr<Builder> mesh;
 
     std::vector<double> pv;
@@ -223,7 +224,7 @@ std::string loadPly(int fd, int64_t size, Sink& sink, Resolver& res) {
             }
             if (points) points->flush();
         } else if (e.name == "face") {
-            if (!mesh) mesh = std::make_unique<Builder>(sink, mat);
+            if (!mesh) mesh = std::make_unique<Builder>(sink, mat, false, part);
             int ii = -1, it = -1;
             for (int i = 0; i < (int)e.props.size(); i++) {
                 const std::string& n = e.props[i].name;
@@ -292,7 +293,7 @@ std::string loadPly(int fd, int64_t size, Sink& sink, Resolver& res) {
     if (faceCount == 0) sink.log(0, "No faces: shown as a point cloud.");
     if (sink.vertexCount.load() == 0 && !verts.empty()) {
         // vertices but no usable faces -> show as points
-        Builder pb(sink, mat, true);
+        Builder pb(sink, mat, true, part);
         for (auto& v : verts) { pb.reserveFace(1); pb.raw(v, true); }
         pb.flush();
     }

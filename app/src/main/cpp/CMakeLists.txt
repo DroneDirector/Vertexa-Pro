@@ -33,6 +33,7 @@ FetchContent_MakeAvailable(assimp)
 add_library(vertexa SHARED
     jni_bridge.cpp
     engine.cpp
+    exporter.cpp
     renderer.cpp
     loader_obj.cpp
     loader_stl.cpp

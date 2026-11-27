@@ -1,5 +1,19 @@
 # Changelog
 
+## Parts, lighting, capture and convert & save
+
+- Parts list (right side): every object/group in the model is a part you can show, hide, isolate or zoom to
+- Tap a part in the 3D view to select and highlight it; tapping empty space deselects, dragging still orbits
+- "Split into loose parts" turns every unconnected piece of an OBJ into its own part (great for single-mesh Meshy models)
+- Studio lighting presets: Studio, Soft box, Dramatic, Outdoor, Rim light, Flat
+- Point cloud controls: point size, original / single / height colours, round points
+- New "Wireframe" mode that shows only the wireframe with hidden edges removed ("See-through" keeps every edge)
+- Snapshot: save the current view as a PNG, optionally with a transparent background
+- Turntable: record a 6-second, 1080×1080 MP4 of the model spinning one full turn
+- Convert & save: write the model as OBJ (+ MTL + textures, parts kept as separate objects in place) or STL, optionally only visible parts
+- Extract archive: save the original files from a ZIP into a folder
+- The file name bar at the top of the viewer is gone; details are under Info
+
 ## ZIP archives
 
 - Models inside ZIP archives now open directly — including Meshy downloads, which are ZIP files even when named .obj

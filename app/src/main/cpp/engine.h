@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -12,7 +13,7 @@ class Engine {
 public:
     Renderer renderer;
 
-    std::string load(int fd, int64_t size, const std::string& name, Resolver& res);
+    std::string load(int fd, int64_t size, const std::string& name, Resolver& res, bool splitLoose = false);
     void cancel() {
         auto s = sink();
         if (s) s->cancel = true;
@@ -25,6 +26,9 @@ public:
         std::lock_guard<std::mutex> l(mu_);
         sink_.reset();
     }
+
+    std::atomic<float> exportProgress{0.f};
+    std::atomic<bool> exportCancel{false};
 
 private:
     std::mutex mu_;

@@ -10,7 +10,7 @@ struct StlEmitter {
     Builder b;
     bool haveOrigin = false;
     double o[3] = {0, 0, 0};
-    explicit StlEmitter(Sink& s, int mat) : sink(s), b(s, mat) {}
+    StlEmitter(Sink& s, int mat, int part) : sink(s), b(s, mat, false, part) {}
 
     void tri(const float* n, const float v[3][3], uint32_t color) {
         if (!haveOrigin) {
@@ -61,7 +61,14 @@ std::string loadStl(int fd, int64_t size, Sink& sink) {
         if (size > 0 && (int64_t)84 + (int64_t)count * 50 == size) binary = true;
         else if (strncmp((const char*)head, "solid", 5) != 0) binary = true;
     }
-    StlEmitter em(sink, mat);
+    std::string solidName;
+    if (!binary && got >= 6) {
+        char nm[80] = {0};
+        memcpy(nm, head + 5, std::min<size_t>(got - 5, 70));
+        for (char& ch : nm) if (ch == '\n' || ch == '\r') ch = 0;
+        solidName = trim(nm);
+    }
+    StlEmitter em(sink, mat, sink.addPart(solidName.empty() ? "Model" : solidName));
     sink.log(0, binary ? "Binary STL, header says " + std::to_string(count) + " triangles" : "ASCII (text) STL");
     if (binary && size > 0 && (int64_t)84 + (int64_t)count * 50 != size)
         sink.log(1, "The triangle count in the header doesn't match the file size (" + std::to_string(size) +

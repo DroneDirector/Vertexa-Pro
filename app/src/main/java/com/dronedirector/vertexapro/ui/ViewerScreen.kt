@@ -1,6 +1,17 @@
 package com.dronedirector.vertexapro.ui
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.outlined.AccountTree
+import androidx.compose.material.icons.outlined.Grain
+import androidx.compose.material.icons.outlined.PhotoCamera
+import androidx.compose.material.icons.outlined.Polyline
+import androidx.compose.material.icons.outlined.SaveAlt
+import androidx.compose.material.icons.outlined.WbSunny
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
@@ -97,7 +108,8 @@ private data class ModeItem(val mode: Int, val label: String, val icon: ImageVec
 private val modeItems = listOf(
     ModeItem(ViewModes.TEXTURED, "Textured", Icons.Outlined.Image),
     ModeItem(ViewModes.SOLID, "Solid", Icons.Outlined.ViewInAr),
-    ModeItem(ViewModes.WIRE, "Wireframe", Icons.Outlined.GridOn),
+    ModeItem(ViewModes.WIRE_CLEAN, "Wireframe", Icons.Outlined.Polyline),
+    ModeItem(ViewModes.WIRE, "See-through", Icons.Outlined.GridOn),
     ModeItem(ViewModes.SOLID_WIRE, "Solid + Wire", Icons.Outlined.Layers),
     ModeItem(ViewModes.TEX_WIRE, "Tex + Wire", Icons.Outlined.AutoAwesomeMosaic),
 )
@@ -114,6 +126,17 @@ fun ViewerScreen(
     val p = LocalPalette.current
     var showInfo by remember { mutableStateOf(false) }
     var showReport by remember { mutableStateOf(false) }
+    var panel by remember { mutableStateOf(Panel.NONE) }
+    var pendingExport by remember { mutableStateOf<Pair<Int, Boolean>?>(null) }
+    val exportFolder = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { tree ->
+        val req = pendingExport
+        pendingExport = null
+        if (tree != null && req != null) { panel = Panel.NONE; c.export(tree, req.first, req.second) }
+    }
+    val extractFolder = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { tree ->
+        if (tree != null) { panel = Panel.NONE; c.extractArchive(tree) }
+    }
+    fun toggle(p: Panel) { panel = if (panel == p) Panel.NONE else p }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     var surface by remember { mutableStateOf<ModelSurfaceView?>(null) }
 
@@ -141,21 +164,7 @@ fun ViewerScreen(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             RoundIconButton(Icons.AutoMirrored.Outlined.ArrowBack, p, contentDescription = "Back") { onBack() }
-            Spacer(Modifier.width(10.dp))
-            Column(
-                Modifier.weight(1f).glass(p, RoundedCornerShape(16.dp), strong = true)
-                    .padding(horizontal = 14.dp, vertical = 8.dp),
-            ) {
-                Text(c.source.name, color = p.text, fontWeight = FontWeight.Bold, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                val s = c.stats
-                val geo = if (s.points > 0 && s.triangles == 0L) "${formatCount(s.points)} points"
-                else "${formatCount(s.triangles)} triangles"
-                Text(
-                    "${Formats.ext(c.source.name).uppercase()} · ${formatBytes(c.source.size)} · $geo",
-                    color = p.muted, fontSize = 12.sp, maxLines = 1,
-                )
-            }
-            Spacer(Modifier.width(10.dp))
+            Spacer(Modifier.weight(1f))
             Box {
                 RoundIconButton(Icons.Outlined.Info, p, active = showInfo, contentDescription = "Model info") { showInfo = !showInfo }
                 val errs = c.report.count { it.level == 2 }
@@ -172,11 +181,21 @@ fun ViewerScreen(
 
         // ---------------- right rail
         Column(
-            Modifier.align(Alignment.CenterEnd).padding(end = 14.dp)
-                .glass(p, RoundedCornerShape(30.dp), strong = true).padding(7.dp),
+            Modifier.align(Alignment.CenterEnd).statusBarsPadding().navigationBarsPadding()
+                .padding(end = 14.dp, top = 70.dp, bottom = 110.dp)
+                .glass(p, RoundedCornerShape(30.dp), strong = true)
+                .verticalScroll(rememberScrollState()).padding(7.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
+            RoundIconButton(Icons.Outlined.AccountTree, p, active = panel == Panel.PARTS, contentDescription = "Parts") { toggle(Panel.PARTS) }
+            RoundIconButton(Icons.Outlined.WbSunny, p, active = panel == Panel.LIGHT, contentDescription = "Lighting") { toggle(Panel.LIGHT) }
+            if (c.stats.points > 0) {
+                RoundIconButton(Icons.Outlined.Grain, p, active = panel == Panel.POINTS, contentDescription = "Point cloud") { toggle(Panel.POINTS) }
+            }
+            RoundIconButton(Icons.Outlined.PhotoCamera, p, active = panel == Panel.CAPTURE, contentDescription = "Capture") { toggle(Panel.CAPTURE) }
+            RoundIconButton(Icons.Outlined.SaveAlt, p, active = panel == Panel.EXPORT, contentDescription = "Convert & save") { toggle(Panel.EXPORT) }
+            Box(Modifier.size(width = 28.dp, height = 1.dp).background(p.border))
             RoundIconButton(Icons.Outlined.Autorenew, p, active = c.autoRotate, contentDescription = "Auto rotate") { c.toggleAutoRotate() }
             RoundIconButton(Icons.Outlined.CenterFocusStrong, p, contentDescription = "Reset view") { c.resetView() }
             RoundIconButton(Icons.Outlined.Grid4x4, p, active = c.grid, contentDescription = "Floor grid") {
@@ -191,6 +210,9 @@ fun ViewerScreen(
             Modifier.align(Alignment.BottomCenter).fillMaxWidth().navigationBarsPadding().padding(bottom = 14.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
+            AnimatedVisibility(c.selectedPart >= 0, enter = fadeIn() + slideInVertically { it }, exit = fadeOut()) {
+                SelectedPartBar(c, p)
+            }
             AnimatedVisibility(c.missing.isNotEmpty(), enter = fadeIn() + slideInVertically { it }, exit = fadeOut()) {
                 MissingBanner(c.missing, p, onLinkFolder) { c.dismissMissing() }
             }
@@ -292,6 +314,41 @@ fun ViewerScreen(
             modifier = Modifier.align(Alignment.Center),
         ) {
             InfoPanel(c, p, onReport = { showInfo = false; showReport = true }) { showInfo = false }
+        }
+
+        // ---------------- side panels
+        AnimatedVisibility(
+            panel != Panel.NONE,
+            enter = fadeIn() + slideInHorizontally { it / 3 }, exit = fadeOut() + slideOutHorizontally { it / 3 },
+            modifier = Modifier.align(Alignment.CenterEnd).statusBarsPadding().navigationBarsPadding().padding(end = 80.dp),
+        ) {
+            val close = { panel = Panel.NONE }
+            when (panel) {
+                Panel.PARTS -> PartsPanel(c, p, close)
+                Panel.LIGHT -> LightingPanel(c, p, close)
+                Panel.POINTS -> PointsPanel(c, p, close)
+                Panel.CAPTURE -> CapturePanel(c, p, close)
+                Panel.EXPORT -> ExportPanel(
+                    c, p,
+                    onPickFolder = { f, vis -> pendingExport = f to vis; exportFolder.launch(null) },
+                    onExtract = { extractFolder.launch(null) },
+                    onClose = close,
+                )
+                Panel.NONE -> {}
+            }
+        }
+
+        // ---------------- capture / export progress
+        val job = c.job
+        AnimatedVisibility(job != null, enter = fadeIn() + scaleIn(initialScale = 0.92f), exit = fadeOut(),
+            modifier = Modifier.align(Alignment.Center)) {
+            if (job != null) {
+                JobCard(
+                    job, p,
+                    onCancel = if (job.title.startsWith("Saving") && !job.title.contains("snapshot")) ({ c.cancelExport() }) else null,
+                    onDismiss = { c.dismissJob() },
+                )
+            }
         }
 
         // ---------------- load report

@@ -7,7 +7,7 @@ object NativeBridge {
 
     @JvmStatic external fun nativeCreate(): Long
     @JvmStatic external fun nativeDestroy(h: Long)
-    @JvmStatic external fun nativeLoad(h: Long, fd: Int, size: Long, name: String, resolver: SiblingResolver): String
+    @JvmStatic external fun nativeLoad(h: Long, fd: Int, size: Long, name: String, resolver: SiblingResolver, split: Boolean): String
     @JvmStatic external fun nativeCancel(h: Long)
     @JvmStatic external fun nativeProgress(h: Long): Float
     @JvmStatic external fun nativeStats(h: Long): LongArray
@@ -16,6 +16,14 @@ object NativeBridge {
     @JvmStatic external fun nativeEmbeddedData(h: Long, idx: Int): ByteArray?
     @JvmStatic external fun nativeBounds(h: Long): DoubleArray
     @JvmStatic external fun nativeReport(h: Long): Array<String>
+    @JvmStatic external fun nativeParts(h: Long): Array<String>
+    @JvmStatic external fun nativePartTriangles(h: Long): LongArray
+    @JvmStatic external fun nativeExport(
+        h: Long, inFd: Int, size: Long, name: String, resolver: SiblingResolver, format: Int,
+        outFd: Int, mtlFd: Int, mtlName: String, hidden: BooleanArray, textures: Array<String>, split: Boolean,
+    ): String
+    @JvmStatic external fun nativeExportProgress(h: Long): Float
+    @JvmStatic external fun nativeExportCancel(h: Long)
 
     // GL thread only
     @JvmStatic external fun nativeSurfaceCreated(h: Long): Boolean
@@ -23,6 +31,10 @@ object NativeBridge {
     @JvmStatic external fun nativeDraw(h: Long, nanos: Long): Boolean
     @JvmStatic external fun nativeClearModel(h: Long)
     @JvmStatic external fun nativeReleaseGl(h: Long)
+    @JvmStatic external fun nativeSnapshot(h: Long, w: Int, hgt: Int, transparent: Boolean, out: java.nio.ByteBuffer): Boolean
+    @JvmStatic external fun nativeBeginTurntable(h: Long)
+    @JvmStatic external fun nativeTurntableFrame(h: Long, angle: Double, w: Int, hgt: Int)
+    @JvmStatic external fun nativeEndTurntable(h: Long)
     @JvmStatic external fun nativeSetTexture(h: Long, material: Int, tex: Int)
 
     // any thread
@@ -32,6 +44,15 @@ object NativeBridge {
     @JvmStatic external fun nativeSetUpAxisZ(h: Long, z: Boolean)
     @JvmStatic external fun nativeSetPointScale(h: Long, s: Float)
     @JvmStatic external fun nativeSetTheme(h: Long, colors: FloatArray)
+    @JvmStatic external fun nativeSetPointColorMode(h: Long, mode: Int)
+    @JvmStatic external fun nativeSetLighting(h: Long, preset: Int)
+    @JvmStatic external fun nativeSetPartHidden(h: Long, part: Int, hidden: Boolean)
+    @JvmStatic external fun nativeSetAllPartsHidden(h: Long, hidden: Boolean)
+    @JvmStatic external fun nativeIsolatePart(h: Long, part: Int)
+    @JvmStatic external fun nativeSelectPart(h: Long, part: Int)
+    @JvmStatic external fun nativeFocusPart(h: Long, part: Int)
+    @JvmStatic external fun nativeRequestPick(h: Long, x: Float, y: Float)
+    @JvmStatic external fun nativePickResult(h: Long): Int
     @JvmStatic external fun nativeTouchDown(h: Long)
     @JvmStatic external fun nativeOrbit(h: Long, dx: Float, dy: Float)
     @JvmStatic external fun nativePan(h: Long, dx: Float, dy: Float)
