@@ -56,7 +56,7 @@ object UpdateManager {
             readTimeout = 15_000
         }
         try {
-            if (conn.responseCode == 404) return@withContext null
+            if (conn.responseCode == 404) error("no releases are visible — the GitHub repository may be private")
             if (conn.responseCode !in 200..299) error("GitHub answered ${conn.responseCode}")
             val json = JSONObject(conn.inputStream.bufferedReader().readText())
             val tag = json.optString("tag_name")
