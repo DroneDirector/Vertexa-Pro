@@ -46,7 +46,7 @@ import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Layers
 import androidx.compose.material.icons.outlined.Link
-import androidx.compose.material.icons.outlined.ThreeSixty
+import androidx.compose.material.icons.outlined.Autorenew
 import androidx.compose.material.icons.outlined.ViewInAr
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -159,7 +159,7 @@ fun ViewerScreen(
             verticalArrangement = Arrangement.spacedBy(8.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            RoundIconButton(Icons.Outlined.ThreeSixty, p, active = c.autoRotate, contentDescription = "Auto rotate") { c.toggleAutoRotate() }
+            RoundIconButton(Icons.Outlined.Autorenew, p, active = c.autoRotate, contentDescription = "Auto rotate") { c.toggleAutoRotate() }
             RoundIconButton(Icons.Outlined.CenterFocusStrong, p, contentDescription = "Reset view") { c.resetView() }
             RoundIconButton(Icons.Outlined.Grid4x4, p, active = c.grid, contentDescription = "Floor grid") {
                 c.toggleGrid(); onGridChanged(c.grid)
