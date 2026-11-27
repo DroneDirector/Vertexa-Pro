@@ -8,6 +8,7 @@ import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.outlined.AccountTree
 import androidx.compose.material.icons.outlined.Bookmarks
+import androidx.compose.material.icons.outlined.Explore
 import androidx.compose.material.icons.outlined.ContentCut
 import androidx.compose.material.icons.outlined.Straighten
 import androidx.compose.material.icons.outlined.Grain
@@ -171,6 +172,7 @@ fun ViewerScreen(
         )
         if (c.cutActive) CutOverlay(c, p)
         if (c.measureActive) MeasureOverlay(c, p)
+        if (c.hingePart >= 0) HingeOverlay(c)
 
         // ---------------- top bar
         Row(
@@ -193,43 +195,49 @@ fun ViewerScreen(
             }
         }
 
-        // ---------------- right rail
+        // ---------------- right rail: tools · view · output, scrolls when the screen is short
         Column(
             Modifier.align(Alignment.CenterEnd).statusBarsPadding().navigationBarsPadding()
-                .padding(end = 14.dp, top = 70.dp, bottom = 110.dp)
-                .glass(p, RoundedCornerShape(30.dp), strong = true)
-                .verticalScroll(rememberScrollState()).padding(7.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+                .padding(end = 12.dp, top = 68.dp, bottom = 104.dp)
+                .glass(p, RoundedCornerShape(28.dp), strong = true)
+                .verticalScroll(rememberScrollState()).padding(6.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            RoundIconButton(Icons.Outlined.ContentCut, p, active = c.cutActive, contentDescription = "Cut tool") {
+            val btn = 42.dp
+            RailLabel("TOOLS", p)
+            RoundIconButton(Icons.Outlined.ContentCut, p, active = c.cutActive, size = btn, contentDescription = "Cut tool") {
                 panel = Panel.NONE
                 if (c.cutActive) c.cancelCut() else c.startCut()
             }
-            RoundIconButton(Icons.Outlined.Straighten, p, active = c.measureActive, contentDescription = "Measure") {
+            RoundIconButton(Icons.Outlined.Straighten, p, active = c.measureActive, size = btn, contentDescription = "Measure") {
                 panel = Panel.NONE
                 c.toggleMeasure()
             }
-            RoundIconButton(Icons.Outlined.AccountTree, p, active = panel == Panel.PARTS, contentDescription = "Parts") {
+            RoundIconButton(Icons.Outlined.AccountTree, p, active = panel == Panel.PARTS, size = btn, contentDescription = "Parts") {
                 toggle(Panel.PARTS)
                 // a model that is one single mesh is split into its loose pieces automatically
                 if (panel == Panel.PARTS && c.parts.size <= 1 && c.canSplit && !c.splitLoose && !c.hasUndo) c.updateSplit(true)
             }
-            RoundIconButton(Icons.Outlined.WbSunny, p, active = panel == Panel.LIGHT, contentDescription = "Lighting") { toggle(Panel.LIGHT) }
+            RailDivider(p)
+            RailLabel("VIEW", p)
+            RoundIconButton(Icons.Outlined.Explore, p, active = panel == Panel.CAMERA, size = btn, contentDescription = "View presets") { toggle(Panel.CAMERA) }
+            RoundIconButton(Icons.Outlined.CenterFocusStrong, p, size = btn, contentDescription = "Reset view") { c.resetView() }
+            RoundIconButton(Icons.Outlined.Autorenew, p, active = c.autoRotate, size = btn, contentDescription = "Auto rotate") { c.toggleAutoRotate() }
+            RoundIconButton(Icons.Outlined.Bookmarks, p, active = panel == Panel.VIEWS, size = btn, contentDescription = "Saved views") { toggle(Panel.VIEWS) }
+            RoundIconButton(Icons.Outlined.WbSunny, p, active = panel == Panel.LIGHT, size = btn, contentDescription = "Lighting") { toggle(Panel.LIGHT) }
             if (c.stats.points > 0) {
-                RoundIconButton(Icons.Outlined.Grain, p, active = panel == Panel.POINTS, contentDescription = "Point cloud") { toggle(Panel.POINTS) }
+                RoundIconButton(Icons.Outlined.Grain, p, active = panel == Panel.POINTS, size = btn, contentDescription = "Point cloud") { toggle(Panel.POINTS) }
             }
-            RoundIconButton(Icons.Outlined.Bookmarks, p, active = panel == Panel.VIEWS, contentDescription = "Saved views") { toggle(Panel.VIEWS) }
-            RoundIconButton(Icons.Outlined.PhotoCamera, p, active = panel == Panel.CAPTURE, contentDescription = "Capture") { toggle(Panel.CAPTURE) }
-            RoundIconButton(Icons.Outlined.SaveAlt, p, active = panel == Panel.EXPORT, contentDescription = "Convert & save") { toggle(Panel.EXPORT) }
-            Box(Modifier.size(width = 28.dp, height = 1.dp).background(p.border))
-            RoundIconButton(Icons.Outlined.Autorenew, p, active = c.autoRotate, contentDescription = "Auto rotate") { c.toggleAutoRotate() }
-            RoundIconButton(Icons.Outlined.CenterFocusStrong, p, contentDescription = "Reset view") { c.resetView() }
-            RoundIconButton(Icons.Outlined.Grid4x4, p, active = c.grid, contentDescription = "Floor grid") {
+            RoundIconButton(Icons.Outlined.Grid4x4, p, active = c.grid, size = btn, contentDescription = "Floor grid") {
                 c.toggleGrid(); onGridChanged(c.grid)
             }
             AxisButton(c.upZ, p) { c.toggleUpAxis() }
-            RoundIconButton(Icons.Outlined.Contrast, p, contentDescription = "Theme") { onCycleTheme() }
+            RoundIconButton(Icons.Outlined.Contrast, p, size = btn, contentDescription = "Theme") { onCycleTheme() }
+            RailDivider(p)
+            RailLabel("SAVE", p)
+            RoundIconButton(Icons.Outlined.PhotoCamera, p, active = panel == Panel.CAPTURE, size = btn, contentDescription = "Capture") { toggle(Panel.CAPTURE) }
+            RoundIconButton(Icons.Outlined.SaveAlt, p, active = panel == Panel.EXPORT, size = btn, contentDescription = "Convert & save") { toggle(Panel.EXPORT) }
         }
 
         // ---------------- bottom: texture warning + mode bar
@@ -241,7 +249,7 @@ fun ViewerScreen(
             AnimatedVisibility(c.lastCut != null, enter = fadeIn() + slideInVertically { it }, exit = fadeOut()) {
                 LastCutBar(c, p)
             }
-            AnimatedVisibility(c.selectedPart >= 0 && !c.cutActive, enter = fadeIn() + slideInVertically { it }, exit = fadeOut()) {
+            AnimatedVisibility(c.selectedPart >= 0 && !c.cutActive && c.hingePart < 0, enter = fadeIn() + slideInVertically { it }, exit = fadeOut()) {
                 SelectedPartBar(c, p) { renaming = c.selectedPart }
             }
             AnimatedVisibility(c.missing.isNotEmpty(), enter = fadeIn() + slideInVertically { it }, exit = fadeOut()) {
@@ -356,12 +364,16 @@ fun ViewerScreen(
             c.measureActive, enter = fadeIn() + slideInVertically { -it }, exit = fadeOut(),
             modifier = Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 66.dp),
         ) { MeasureToolbar(c, p) }
+        AnimatedVisibility(
+            c.hingePart >= 0, enter = fadeIn() + slideInVertically { -it }, exit = fadeOut(),
+            modifier = Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 66.dp),
+        ) { HingeToolbar(c, p) }
 
         // ---------------- side panels
         AnimatedVisibility(
             panel != Panel.NONE,
             enter = fadeIn() + slideInHorizontally { it / 3 }, exit = fadeOut() + slideOutHorizontally { it / 3 },
-            modifier = Modifier.align(Alignment.CenterEnd).statusBarsPadding().navigationBarsPadding().padding(end = 80.dp),
+            modifier = Modifier.align(Alignment.CenterEnd).statusBarsPadding().navigationBarsPadding().padding(end = 72.dp),
         ) {
             val close = { panel = Panel.NONE }
             when (panel) {
@@ -370,6 +382,7 @@ fun ViewerScreen(
                 Panel.POINTS -> PointsPanel(c, p, close)
                 Panel.CAPTURE -> CapturePanel(c, p, close)
                 Panel.VIEWS -> ViewsPanel(c, p, close)
+                Panel.CAMERA -> CameraPanel(c, p, close)
                 Panel.EXPORT -> ExportPanel(
                     c, p,
                     onPickFolder = { f, vis -> pendingExport = f to vis; exportFolder.launch(null) },
@@ -432,7 +445,7 @@ private fun ModeButton(m: ModeItem, selected: Boolean, p: Palette, onClick: () -
 @Composable
 private fun AxisButton(z: Boolean, p: Palette, onClick: () -> Unit) {
     Box(
-        Modifier.size(46.dp).clip(CircleShape).background(p.glassStrong).pressable(onClick),
+        Modifier.size(42.dp).clip(CircleShape).background(p.glassStrong).pressable(onClick),
         contentAlignment = Alignment.Center,
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -636,3 +649,14 @@ fun ReportPanel(c: ViewerController, p: Palette, onClose: () -> Unit) {
     }
 }
 
+
+@Composable
+private fun RailLabel(text: String, p: Palette) {
+    Text(text, color = p.muted, fontSize = 8.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp,
+        modifier = Modifier.padding(top = 2.dp))
+}
+
+@Composable
+private fun RailDivider(p: Palette) {
+    Box(Modifier.padding(vertical = 2.dp).size(width = 26.dp, height = 1.dp).background(p.border))
+}

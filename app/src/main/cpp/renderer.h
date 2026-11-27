@@ -53,9 +53,10 @@ public:
     // ---- editing (worker thread; uses the in-memory copy of the geometry)
     struct CutRequest {
         std::vector<float> points;  // lasso corners in model space (x, y, z) * n
-        int mode = 0;               // 0 cut through, 1 surface only, 2 one wall (outer + inner skin)
+        int mode = 0;               // 0 cut through, 1 surface only, 2 one wall, 3 through the first object only
         std::string name;
         int mirrorAxis = -1;        // 0/1/2: cut the mirror image across the model's centre on that axis
+        int onlyPart = -1;          // >= 0: cut only this part
         bool keepUndo = true;       // false for the second half of a mirrored cut (undo covers both)
     };
     struct CutResult {
@@ -79,7 +80,16 @@ public:
     /** Saves the geometry held in memory (including edits). */
     std::string exportMemory(const ExportOptions& opt, Sink* sink);
     struct CutCam;
+    M4 projection(const Frame& f, int w, int h, double nearP, double far) const;
     bool cutCamera(CutCam& cc);
+    void deletePart(int part, Sink* sink);
+    /** 0 / 1 / 2: the axis the model is most symmetric across (through its centre). */
+    int detectMirrorAxis();
+    /** Pixels per model unit at the model's centre in the current view. */
+    double pixelsPerUnit();
+    /** Writes a binary glTF with one node per part, pivots from [pivots] (x,y,z per part, NaN = part centre). */
+    std::string exportGlb(int fd, const std::vector<float>& pivots, const std::vector<std::vector<uint8_t>>& images,
+                          const std::vector<std::string>& mimes, const std::vector<uint8_t>& hidden, Sink* sink);
     void setCpuBudget(size_t bytes) { std::lock_guard<std::mutex> l(dataMu_); cpuBudget_ = bytes; }
 
     // ---- animation (any thread)
@@ -117,6 +127,12 @@ public:
             animStart_ = -1;
         }
     }
+
+    // ---- camera presets, flat view, hinges (any thread)
+    void setOrtho(bool o) { std::lock_guard<std::mutex> l(mu_); ortho_ = o; }
+    void viewPreset(int v);  // 0 top, 1 bottom, 2 front, 3 back, 4 left, 5 right
+    /** Rotates a part about the hinge a→b by deg degrees (NaN removes the hinge). */
+    void setPartHinge(int part, const float* a, const float* b, float deg);
 
     // any thread
     void setMode(int m) { std::lock_guard<std::mutex> l(mu_); mode_ = m; }
@@ -167,6 +183,8 @@ private:
         int lighting = 0;
         bool upZ = false;
         int selected = -1;
+        bool ortho = false;
+        std::map<int, M4> partXf;
         std::vector<uint8_t> hidden;
         std::vector<Material> mats;
     };
@@ -196,6 +214,8 @@ private:
     int lighting_ = 0;
     int selected_ = -1;
     int pendingFocus_ = -1;
+    bool ortho_ = false;
+    std::map<int, M4> partXf_;
     std::vector<uint8_t> hidden_;
     std::vector<PartInfo> parts_;
 

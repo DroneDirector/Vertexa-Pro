@@ -13,6 +13,7 @@ object Exporter {
     const val OBJ = 0
     const val STL = 1
     const val STL_PER_PART = 2
+    const val GLB = 3
 
     private fun parentDoc(tree: Uri): Uri =
         DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
@@ -38,10 +39,33 @@ object Exporter {
         split: Boolean,
         fromMemory: Boolean = false,
         partNames: Map<Int, String> = emptyMap(),
+        pivots: FloatArray = FloatArray(0),
     ): String {
         val cr = ctx.contentResolver
         val parent = parentDoc(tree)
         val base = safeBase(src.name)
+        if (format == GLB) {
+            if (!fromMemory) error("GLB export needs the model in memory — it's too large on this device. Use OBJ instead.")
+            val images = arrayOfNulls<ByteArray>(materialTextures.size)
+            val mimes = Array(materialTextures.size) { "" }
+            val cache = HashMap<String, Pair<ByteArray, String>?>()
+            materialTextures.forEachIndexed { i, t ->
+                if (t.isEmpty()) return@forEachIndexed
+                val img = cache.getOrPut(t) { runCatching { textureBytes(ctx, handle, t, resolver) }.getOrNull() }
+                if (img != null) { images[i] = img.first; mimes[i] = img.second }
+            }
+            val u = create(ctx, parent, "$base.glb", "model/gltf-binary")
+            try {
+                val fd = cr.openFileDescriptor(u, "w")?.detachFd() ?: error("Couldn't open the output file.")
+                val err = NativeBridge.nativeExportGlb(handle, fd, pivots, images, mimes, hidden)
+                if (err.isNotEmpty()) error(if (err == "no-memory-copy") "This model is too large to save as GLB on this device." else err)
+            } catch (e: Exception) {
+                runCatching { DocumentsContract.deleteDocument(cr, u) }
+                throw e
+            }
+            return "Saved ${nameOf(ctx, u, "$base.glb")} — every part is its own object with its pivot" +
+                (if (pivots.any { !it.isNaN() }) " (hinges as pivots)." else " at its centre.")
+        }
         if (format == STL_PER_PART) {
             if (!fromMemory) error("One file per part needs the model in memory — it's too large on this device. Use a single STL instead.")
             val created = mutableListOf<Uri>()
@@ -105,6 +129,32 @@ object Exporter {
             created.forEach { runCatching { DocumentsContract.deleteDocument(cr, it) } }
             throw e
         }
+    }
+
+    /** Texture as PNG or JPEG bytes for embedding in a GLB. */
+    private fun textureBytes(ctx: Context, handle: Long, name: String, resolver: SiblingResolver): Pair<ByteArray, String>? {
+        fun asPng(bmp: Bitmap): Pair<ByteArray, String> {
+            val o = java.io.ByteArrayOutputStream()
+            bmp.compress(Bitmap.CompressFormat.PNG, 100, o)
+            return o.toByteArray() to "image/png"
+        }
+        fun sniff(b: ByteArray): String? = when {
+            b.size > 4 && b[0] == 0x89.toByte() && b[1] == 'P'.code.toByte() -> "image/png"
+            b.size > 3 && b[0] == 0xFF.toByte() && b[1] == 0xD8.toByte() -> "image/jpeg"
+            else -> null
+        }
+        if (name.startsWith("*")) {
+            val idx = name.substring(1).toIntOrNull() ?: return null
+            val size = NativeBridge.nativeEmbeddedSize(handle, idx)
+            val data = NativeBridge.nativeEmbeddedData(handle, idx) ?: return null
+            if (size[0] > 0 && size[1] > 0) return asPng(TextureDecoder.fromRgba(size[0], size[1], data, 16384))
+            sniff(data)?.let { return data to it }
+            return TextureDecoder.decodeBytes(data, 8192)?.let { asPng(it) }
+        }
+        val uri = resolver.findUri(name) ?: return null
+        val bytes = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return null
+        sniff(bytes)?.let { return bytes to it }
+        return TextureDecoder.decodeBytes(bytes, 8192)?.let { asPng(it) }
     }
 
     /** Copies one texture next to the exported OBJ; returns the file name used in the MTL. */

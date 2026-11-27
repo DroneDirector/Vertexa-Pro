@@ -49,6 +49,35 @@ inline M4 perspective(double fovy, double aspect, double n, double f) {
     return r;
 }
 
+inline M4 ortho(double l, double r, double b, double t, double n, double f) {
+    M4 o = M4::identity();
+    o.m[0] = 2 / (r - l);
+    o.m[5] = 2 / (t - b);
+    o.m[10] = -2 / (f - n);
+    o.m[12] = -(r + l) / (r - l);
+    o.m[13] = -(t + b) / (t - b);
+    o.m[14] = -(f + n) / (f - n);
+    return o;
+}
+
+/** Rotation by angle (radians) about the axis through point a with direction d. */
+inline M4 rotateAbout(const V3& a, V3 d, double ang) {
+    d = d.norm();
+    double c = std::cos(ang), s = std::sin(ang), t = 1 - c;
+    double x = d.x, y = d.y, z = d.z;
+    M4 r = M4::identity();
+    // column-major
+    r.m[0] = t * x * x + c;     r.m[4] = t * x * y - s * z; r.m[8] = t * x * z + s * y;
+    r.m[1] = t * x * y + s * z; r.m[5] = t * y * y + c;     r.m[9] = t * y * z - s * x;
+    r.m[2] = t * x * z - s * y; r.m[6] = t * y * z + s * x; r.m[10] = t * z * z + c;
+    V3 ra(r.m[0] * a.x + r.m[4] * a.y + r.m[8] * a.z, r.m[1] * a.x + r.m[5] * a.y + r.m[9] * a.z,
+          r.m[2] * a.x + r.m[6] * a.y + r.m[10] * a.z);
+    r.m[12] = a.x - ra.x;
+    r.m[13] = a.y - ra.y;
+    r.m[14] = a.z - ra.z;
+    return r;
+}
+
 inline M4 lookAt(const V3& eye, const V3& at, const V3& up) {
     V3 f = (at - eye).norm();
     V3 s = f.cross(up).norm();

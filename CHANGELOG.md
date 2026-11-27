@@ -2,6 +2,14 @@
 
 ## Next
 
+- View presets (Top, Bottom, Front, Back, Left, Right) and a Flat view without perspective — also as quick buttons in the cut tool
+- New cut mode "Through the first object" (now the default): cuts the nearest object top and bottom, never what's behind it
+- Flap template: tap the trailing edge where the flap starts and ends, set the chord depth, and the outline is built for you
+- Hinge: set a hinge line on any part and swing it with a slider to check the cut; the hinge becomes the part's pivot
+- Gap: leave an adjustable gap (0–30 mm) between a cut part and the model, both sides sealed
+- Mirror cut finds the model's mirror axis automatically
+- Save as GLB: every part its own object with its hinge (or centre) as pivot, textures embedded — ready for Blender, Unreal and MSFS tools
+- Right-side controls regrouped into Tools · View · Save, and they scroll on short screens
 - Undo and Redo while drawing the cut outline (every point or drawn shape, before you create the part)
 - Redo for a cut you've undone
 - Opening the Parts panel on a model that is one single mesh splits it into its loose pieces automatically

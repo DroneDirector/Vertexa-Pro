@@ -37,7 +37,14 @@ object NativeBridge {
     @JvmStatic external fun nativeSetCpuBudget(h: Long, bytes: Long)
     @JvmStatic external fun nativeRaycast(h: Long, x: Float, y: Float): FloatArray?
     @JvmStatic external fun nativeProject(h: Long, pts: FloatArray): FloatArray
-    @JvmStatic external fun nativeCut(h: Long, pts: FloatArray, mode: Int, name: String, mirrorAxis: Int, keepUndo: Boolean): String
+    @JvmStatic external fun nativeCut(h: Long, pts: FloatArray, mode: Int, name: String, mirrorAxis: Int, keepUndo: Boolean, onlyPart: Int): String
+    @JvmStatic external fun nativeSetOrtho(h: Long, on: Boolean)
+    @JvmStatic external fun nativeViewPreset(h: Long, preset: Int)
+    @JvmStatic external fun nativeSetPartHinge(h: Long, part: Int, a: FloatArray, b: FloatArray, deg: Float)
+    @JvmStatic external fun nativeDeletePart(h: Long, part: Int)
+    @JvmStatic external fun nativeDetectMirrorAxis(h: Long): Int
+    @JvmStatic external fun nativePixelsPerUnit(h: Long): Double
+    @JvmStatic external fun nativeExportGlb(h: Long, fd: Int, pivots: FloatArray, images: Array<ByteArray?>, mimes: Array<String>, hidden: BooleanArray): String
     @JvmStatic external fun nativeSnap(h: Long, x: Float, y: Float, px: Float, corners: Boolean, edges: Boolean): FloatArray?
     @JvmStatic external fun nativeUnproject(h: Long, xy: FloatArray): FloatArray
     @JvmStatic external fun nativeUndoCut(h: Long): Boolean

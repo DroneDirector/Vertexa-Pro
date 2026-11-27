@@ -20,8 +20,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import kotlin.math.roundToInt
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -57,7 +59,8 @@ import androidx.compose.ui.unit.sp
 import com.dronedirector.vertexapro.viewer.ViewerController
 
 val cutModes = listOf(
-    Triple("Cut through", "Everything inside the outline, all the way through — flaps, ailerons, rudders", 0),
+    Triple("Through the first object", "The nearest object only, top and bottom — flaps and ailerons without touching what's behind", 3),
+    Triple("Cut through everything", "Everything inside the outline, all the way through", 0),
     Triple("One wall", "Outer and inner skin only, never the far side — doors, hatches, panels", 2),
     Triple("Surface", "Only the surface you outlined — a single skin or panel", 1),
 )
@@ -77,6 +80,7 @@ fun CutOverlay(c: ViewerController, p: Palette) {
     val pulse by t.animateFloat(0.6f, 1.25f, infiniteRepeatable(tween(900, easing = LinearEasing), RepeatMode.Reverse), label = "pulse")
     val dash by t.animateFloat(0f, 40f, infiniteRepeatable(tween(1200, easing = LinearEasing)), label = "dash")
     val live = c.drawPath
+    val flap = c.flapPreview
     val outline = c.outlineForOverlay(pts)
     Canvas(Modifier.fillMaxSize()) {
         val glow0 = Color(0xFFFF9E26)
@@ -91,6 +95,15 @@ fun CutOverlay(c: ViewerController, p: Palette) {
                 val m = live.size / 2
                 drawLine(glow0, Offset(live[(m - 1) * 2], live[(m - 1) * 2 + 1]), Offset(live[0], live[1]),
                     strokeWidth = 3.dp.toPx(), cap = StrokeCap.Round)
+            }
+        }
+        if (flap.size >= 8) {
+            val m = flap.size / 2
+            for (i in 0 until m) {
+                val a = Offset(flap[i * 2], flap[i * 2 + 1])
+                val b = Offset(flap[((i + 1) % m) * 2], flap[((i + 1) % m) * 2 + 1])
+                drawLine(Color.Black.copy(alpha = 0.35f), a, b, strokeWidth = 7.dp.toPx(), cap = StrokeCap.Round)
+                drawLine(glow0, a, b, strokeWidth = 3.dp.toPx(), cap = StrokeCap.Round)
             }
         }
         // smoothed curve preview
@@ -171,17 +184,39 @@ fun CutToolbar(c: ViewerController, p: Palette) {
             Modifier.horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically,
         ) {
-            listOf("Points", "Curve", "Freehand", "Rectangle", "Ellipse").forEachIndexed { i, label ->
+            listOf("Points", "Curve", "Freehand", "Rectangle", "Ellipse", "Flap").forEachIndexed { i, label ->
                 PillChip(label, c.cutShape == i, p) {
                     if (c.cutShape != i) { c.cutShape = i; c.cutHint = shapeHint(i) }
                 }
             }
         }
-        if (c.cutShape <= 1) {
-            VSpace(8.dp)
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                PillChip("Snap to corners & edges", c.snapOn, p) { c.snapOn = !c.snapOn }
+        VSpace(8.dp)
+        Row(
+            Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically,
+        ) {
+            PillChip("Top", false, p) { c.viewPreset(0) }
+            PillChip("Front", false, p) { c.viewPreset(2) }
+            PillChip("Side", false, p) { c.viewPreset(5) }
+            PillChip("Flat view", c.ortho, p) { c.toggleOrtho() }
+            if (c.cutShape <= 1) {
+                PillChip("Snap", c.snapOn, p) { c.snapOn = !c.snapOn }
                 PillChip("Straight 45°", c.straightOn, p) { c.straightOn = !c.straightOn }
+            }
+        }
+        if (c.cutShape == com.dronedirector.vertexapro.viewer.CutGeometry.FLAP && c.cutPoints.size >= 2) {
+            VSpace(8.dp)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Chord depth ${(c.flapDepth * 100).toInt()}%", color = p.text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.width(130.dp))
+                androidx.compose.material3.Slider(
+                    value = c.flapDepth, onValueChange = { c.setFlapDepthValue(it) }, valueRange = 0.08f..0.5f,
+                    modifier = Modifier.weight(1f),
+                    colors = androidx.compose.material3.SliderDefaults.colors(thumbColor = p.accent, activeTrackColor = p.accent2, inactiveTrackColor = p.border),
+                )
+            }
+            if (c.flapPreview.size >= 8) {
+                GradientButton("Use outline", Icons.Outlined.ContentCut, p, Modifier.fillMaxWidth()) { c.useFlapOutline() }
             }
         }
         VSpace(8.dp)
@@ -196,6 +231,7 @@ fun CutToolbar(c: ViewerController, p: Palette) {
 }
 
 fun shapeHint(shape: Int) = when (shape) {
+    5 -> "Tap the wing's trailing edge where the flap starts, then where it ends."
     0 -> "Tap points on the model around the area. Drag to rotate between taps."
     1 -> "Tap points around the area — they're joined by a smooth curve."
     2 -> "Draw around the area with one finger. Two fingers move the view."
@@ -234,10 +270,11 @@ fun ConnectPrompt(c: ViewerController, p: Palette) {
 @Composable
 fun CreatePartCard(c: ViewerController, p: Palette) {
     var name by remember { mutableStateOf(c.nextCutName()) }
-    var mode by remember { mutableStateOf(c.cutMode) }
+    var mode by remember { mutableStateOf(if (c.cutMode in listOf(0, 1, 2, 3)) c.cutMode else 3) }
     Box(Modifier.fillMaxSize().background(Color(0x66000000)), contentAlignment = Alignment.Center) {
         Column(
-            Modifier.padding(20.dp).widthIn(max = 420.dp).glass(p, RoundedCornerShape(30.dp), strong = true).padding(22.dp),
+            Modifier.padding(20.dp).widthIn(max = 440.dp).glass(p, RoundedCornerShape(30.dp), strong = true)
+                .verticalScroll(rememberScrollState()).padding(22.dp),
         ) {
             Text("Create separate part", color = p.text, fontSize = 20.sp, fontWeight = FontWeight.Black)
             Text("The new part stays exactly in place.", color = p.muted, fontSize = 13.sp)
@@ -283,8 +320,26 @@ fun CreatePartCard(c: ViewerController, p: Palette) {
                 VSpace(8.dp)
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text("Mirror across", color = p.muted, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                    listOf("X", "Y", "Z").forEachIndexed { i, a -> PillChip(a, c.mirrorAxis == i, p) { c.mirrorAxis = i } }
+                    listOf("X", "Y", "Z").forEachIndexed { i, a ->
+                        PillChip(a + if (c.mirrorAuto && c.mirrorAxis == i) " (auto)" else "", c.mirrorAxis == i, p) {
+                            c.mirrorAxis = i; c.mirrorAuto = false
+                        }
+                    }
                 }
+            }
+            VSpace(12.dp)
+            Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(p.glass).padding(12.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Gap", color = p.text, fontWeight = FontWeight.Bold, fontSize = 15.sp, modifier = Modifier.weight(1f))
+                    Text(if (c.gapMm <= 0.05f) "None" else String.format(java.util.Locale.US, "%.1f mm", c.gapMm), color = p.accent,
+                        fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                }
+                Text("Space between the new part and the model (uses the measure unit: 1 unit = ${listOf("m", "cm", "mm", "in", "ft")[c.unit]})",
+                    color = p.muted, fontSize = 12.sp)
+                androidx.compose.material3.Slider(
+                    value = c.gapMm, onValueChange = { c.gapMm = (it * 2).roundToInt() / 2f }, valueRange = 0f..30f,
+                    colors = androidx.compose.material3.SliderDefaults.colors(thumbColor = p.accent, activeTrackColor = p.accent2, inactiveTrackColor = p.border),
+                )
             }
             VSpace(18.dp)
             if (c.cutBusy) {
@@ -377,6 +432,69 @@ fun RenameDialog(initial: String, p: Palette, onDone: (String?) -> Unit) {
                 GlassButton("Cancel", null, p) { onDone(null) }
                 GradientButton("Save", null, p) { onDone(name) }
             }
+        }
+    }
+}
+
+// ---------------------------------------------------------------- hinge
+
+@Composable
+fun HingeOverlay(c: ViewerController) {
+    var pts by remember { mutableStateOf(FloatArray(0)) }
+    LaunchedEffect(c.hingePart) {
+        while (c.hingePart >= 0) {
+            withFrameNanos { }
+            pts = c.projectHingePoints()
+        }
+        pts = FloatArray(0)
+    }
+    val col = Color(0xFF7CF29A)
+    Canvas(Modifier.fillMaxSize()) {
+        val n = pts.size / 2
+        fun ok(i: Int) = i < n && !pts[i * 2].isNaN()
+        fun pt(i: Int) = Offset(pts[i * 2], pts[i * 2 + 1])
+        if (ok(0) && ok(1)) {
+            drawLine(Color.Black.copy(alpha = 0.4f), pt(0), pt(1), strokeWidth = 7.dp.toPx(), cap = StrokeCap.Round)
+            drawLine(col, pt(0), pt(1), strokeWidth = 3.dp.toPx(), cap = StrokeCap.Round)
+        }
+        for (i in 0 until n) if (ok(i)) {
+            drawCircle(Color.Black.copy(alpha = 0.4f), 8.dp.toPx(), pt(i))
+            drawCircle(col, 6.dp.toPx(), pt(i))
+        }
+    }
+}
+
+@Composable
+fun HingeToolbar(c: ViewerController, p: Palette) {
+    val part = c.parts.firstOrNull { it.index == c.hingePart }
+    val h = c.hinges[c.hingePart]
+    Column(Modifier.padding(horizontal = 16.dp).widthIn(max = 600.dp).glass(p, RoundedCornerShape(22.dp), strong = true).padding(14.dp)) {
+        Text("Hinge · ${part?.name ?: ""}", color = p.text, fontWeight = FontWeight.Black, fontSize = 16.sp, maxLines = 1)
+        Text(
+            if (h == null) "Tap two points along the hinge line (snaps to edges and corners)."
+            else "Move the slider to swing the part around its hinge.",
+            color = p.muted, fontSize = 12.sp,
+        )
+        if (h != null) {
+            VSpace(6.dp)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(String.format(java.util.Locale.US, "%+.0f°", h.deg), color = p.accent, fontWeight = FontWeight.Black,
+                    fontSize = 15.sp, modifier = Modifier.width(56.dp))
+                androidx.compose.material3.Slider(
+                    value = h.deg, onValueChange = { c.setDeflection(c.hingePart, it.roundToInt().toFloat()) }, valueRange = -60f..60f,
+                    modifier = Modifier.weight(1f),
+                    colors = androidx.compose.material3.SliderDefaults.colors(thumbColor = p.accent, activeTrackColor = p.accent2, inactiveTrackColor = p.border),
+                )
+            }
+        }
+        VSpace(8.dp)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (h != null) {
+                PillChip("0°", false, p) { c.setDeflection(c.hingePart, 0f) }
+                PillChip("New hinge line", false, p) { c.removeHinge(c.hingePart) }
+            }
+            Spacer(Modifier.weight(1f))
+            PillChip("Done", false, p) { c.endHinge() }
         }
     }
 }

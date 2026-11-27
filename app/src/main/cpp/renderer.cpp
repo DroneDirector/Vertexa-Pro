@@ -287,6 +287,7 @@ void Renderer::clearModel() {
     std::lock_guard<std::mutex> l(mu_);
     bounds_ = Bounds();
     parts_.clear();
+    partXf_.clear();
     hidden_.clear();
     selected_ = -1;
     userMoved_ = false;
@@ -421,7 +422,7 @@ void Renderer::orbit(float dx, float dy) {
     userMoved_ = true;
     cam_.yaw -= dx / (double)w_ * M_PI * 1.6;
     cam_.pitch += dy / (double)h_ * M_PI * 1.0;
-    cam_.pitch = std::clamp(cam_.pitch, -1.55, 1.55);
+    cam_.pitch = std::clamp(cam_.pitch, -1.569, 1.569);
 }
 
 void Renderer::fling(float vx, float vy) {
@@ -455,6 +456,54 @@ void Renderer::resetView(bool animate) {
     pendingReset_ = true;
     pendingAnimate_ = animate;
     velYaw_ = velPitch_ = 0;
+}
+
+M4 Renderer::projection(const Frame& f, int w, int h, double nearP, double far) const {
+    double aspect = (double)w / (double)h;
+    if (!f.ortho) return perspective(kFov, aspect, nearP, far);
+    double hw = f.cam.dist * std::tan(kFov / 2);
+    return ortho(-hw * aspect, hw * aspect, -hw, hw, nearP, far);
+}
+
+void Renderer::viewPreset(int v) {
+    std::lock_guard<std::mutex> l(mu_);
+    Cam t = cam_;
+    const double up = 1.569;
+    switch (v) {
+        case 0: t.yaw = 0; t.pitch = up; break;          // top
+        case 1: t.yaw = 0; t.pitch = -up; break;         // bottom
+        case 2: t.yaw = 0; t.pitch = 0; break;           // front
+        case 3: t.yaw = M_PI; t.pitch = 0; break;        // back
+        case 4: t.yaw = -M_PI / 2; t.pitch = 0; break;   // left
+        default: t.yaw = M_PI / 2; t.pitch = 0; break;   // right
+    }
+    Bounds rb = rotatedBounds(bounds_);
+    if (rb.valid()) {
+        Cam fit;
+        fitCamera(fit, rb, true);
+        t.target = fit.target;
+        t.dist = fit.dist;
+    }
+    animFrom_ = cam_;
+    double d = std::fmod(animFrom_.yaw - t.yaw, 2 * M_PI);
+    if (d > M_PI) d -= 2 * M_PI;
+    if (d < -M_PI) d += 2 * M_PI;
+    animFrom_.yaw = t.yaw + d;
+    animTo_ = t;
+    animStart_ = lastTime_;
+    velYaw_ = velPitch_ = 0;
+    userMoved_ = true;
+}
+
+void Renderer::setPartHinge(int part, const float* a, const float* b, float deg) {
+    std::lock_guard<std::mutex> l(mu_);
+    if (std::isnan(deg)) {
+        partXf_.erase(part);
+        return;
+    }
+    V3 A(a[0], a[1], a[2]), B(b[0], b[1], b[2]);
+    if ((B - A).len() <= 0) return;
+    partXf_[part] = rotateAbout(A, B - A, deg * M_PI / 180.0);
 }
 
 // ---------------------------------------------------------------- parts
@@ -499,6 +548,8 @@ Renderer::Frame Renderer::frameState() {
     f.lighting = lighting_;
     f.upZ = upZ_;
     f.selected = selected_;
+    f.ortho = ortho_;
+    f.partXf = partXf_;
     f.hidden = hidden_;
     f.mats = materials_;
     return f;
@@ -595,7 +646,7 @@ bool Renderer::draw(Sink* sink, double now) {
         }
         if (std::fabs(velYaw_) > 1e-3 || std::fabs(velPitch_) > 1e-3) {
             cam_.yaw += velYaw_ * dt;
-            cam_.pitch = std::clamp(cam_.pitch + velPitch_ * dt, -1.55, 1.55);
+            cam_.pitch = std::clamp(cam_.pitch + velPitch_ * dt, -1.569, 1.569);
             double k = std::exp(-3.5 * dt);
             velYaw_ *= k;
             velPitch_ *= k;
@@ -675,7 +726,8 @@ void Renderer::renderScene(const Frame& f, int w, int h, bool background, bool a
     double dc = (eye - center).len();
     double far = dc + radius * 8.0 * 1.05;
     double nearP = std::max(dc - radius * 1.05, far * 2e-5);
-    M4 proj = perspective(kFov, (double)w / (double)h, nearP, far);
+    if (f.ortho) nearP = std::max(dc - radius * 1.5, far * 1e-4);
+    M4 proj = projection(f, w, h, nearP, far);
     M4 model = f.upZ ? rotX(-M_PI / 2) : M4::identity();
     M4 mv = view * model;
 
@@ -705,13 +757,19 @@ void Renderer::renderScene(const Frame& f, int w, int h, bool background, bool a
     GLint uShade = U(P, "uShade"), uKd = U(P, "uKd"), uHasTex = U(P, "uHasTex"), uLine = U(P, "uLine"), uSel = U(P, "uSel");
     GLint uMVl = U(P, "uMV"), uNl = U(P, "uN");
     auto setXf = [&](const Gpu& g) {
-        if (!g.hasXf) {
+        auto pit = f.partXf.find(g.part);
+        if (!g.hasXf && pit == f.partXf.end()) {
             glUniformMatrix4fv(uMVl, 1, GL_FALSE, fmv);
             glUniformMatrix3fv(uNl, 1, GL_FALSE, fn);
             return;
         }
-        M4 x;
-        for (int i = 0; i < 16; i++) x.m[i] = g.xf[i];
+        M4 x = M4::identity();
+        if (pit != f.partXf.end()) x = pit->second;
+        if (g.hasXf) {
+            M4 ax;
+            for (int i = 0; i < 16; i++) ax.m[i] = g.xf[i];
+            x = x * ax;
+        }
         M4 m2 = mv * x;
         float a[16], nn[9];
         m2.toFloat(a);
@@ -885,7 +943,8 @@ void Renderer::renderPick(const Frame& f, int x, int y) {
         double dc = (eye - center).len();
         double far = dc + radius * 8.0 * 1.05;
         double nearP = std::max(dc - radius * 1.05, far * 2e-5);
-        M4 proj = perspective(kFov, (double)w_ / (double)h_, nearP, far);
+        if (f.ortho) nearP = std::max(dc - radius * 1.5, far * 1e-4);
+        M4 proj = projection(f, w_, h_, nearP, far);
         M4 mv = view * (f.upZ ? rotX(-M_PI / 2) : M4::identity());
         float fmv[16], fp[16];
         mv.toFloat(fmv);
@@ -899,9 +958,14 @@ void Renderer::renderPick(const Frame& f, int x, int y) {
             if (partHidden(f, g.part)) continue;
             int id = g.part + 1;
             glUniform4f(uId, (id & 255) / 255.f, ((id >> 8) & 255) / 255.f, ((id >> 16) & 255) / 255.f, 1.f);
-            if (g.hasXf) {
-                M4 x;
-                for (int i = 0; i < 16; i++) x.m[i] = g.xf[i];
+            auto pit = f.partXf.find(g.part);
+            if (g.hasXf || pit != f.partXf.end()) {
+                M4 x = pit != f.partXf.end() ? pit->second : M4::identity();
+                if (g.hasXf) {
+                    M4 ax;
+                    for (int i = 0; i < 16; i++) ax.m[i] = g.xf[i];
+                    x = x * ax;
+                }
                 float a[16];
                 (mv * x).toFloat(a);
                 glUniformMatrix4fv(U(pickProg_, "uMV"), 1, GL_FALSE, a);

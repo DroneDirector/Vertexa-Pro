@@ -19,6 +19,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Bookmark
 import androidx.compose.material.icons.outlined.BookmarkAdd
@@ -62,7 +64,7 @@ import com.dronedirector.vertexapro.data.formatCount
 import com.dronedirector.vertexapro.viewer.JobState
 import com.dronedirector.vertexapro.viewer.ViewerController
 
-enum class Panel { NONE, PARTS, LIGHT, POINTS, CAPTURE, EXPORT, VIEWS }
+enum class Panel { NONE, PARTS, LIGHT, POINTS, CAPTURE, EXPORT, VIEWS, CAMERA }
 
 @Composable
 private fun PanelShell(title: String, subtitle: String?, p: Palette, onClose: () -> Unit, content: @Composable () -> Unit) {
@@ -174,18 +176,21 @@ fun SelectedPartBar(c: ViewerController, p: Palette, onRename: () -> Unit) {
     ) {
         Box(Modifier.size(10.dp).clip(CircleShape).background(Color(0xFFFF9E26)))
         Spacer(Modifier.width(10.dp))
-        Column(Modifier.weight(1f, fill = false).widthIn(max = 220.dp)) {
+        Column(Modifier.widthIn(max = 160.dp)) {
             Text(part.name, color = p.text, fontWeight = FontWeight.Bold, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(if (part.triangles > 0) "${formatCount(part.triangles)} triangles" else "${formatCount(part.points)} points", color = p.muted, fontSize = 11.sp)
         }
         Spacer(Modifier.width(8.dp))
-        PillChip("Rename", false, p) { onRename() }
-        Spacer(Modifier.width(6.dp))
-        PillChip("Focus", false, p) { c.focusPart(part.index) }
-        Spacer(Modifier.width(6.dp))
-        PillChip("Isolate", false, p) { c.isolatePart(part.index) }
-        Spacer(Modifier.width(6.dp))
-        PillChip("Hide", false, p) { c.setPartVisible(part.index, false) }
+        Row(
+            Modifier.weight(1f, fill = false).horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            if (c.canEdit) PillChip(if (c.hinges.containsKey(part.index)) "Hinge ✓" else "Hinge", false, p) { c.startHinge(part.index) }
+            PillChip("Rename", false, p) { onRename() }
+            PillChip("Focus", false, p) { c.focusPart(part.index) }
+            PillChip("Isolate", false, p) { c.isolatePart(part.index) }
+            PillChip("Hide", false, p) { c.setPartVisible(part.index, false) }
+        }
         Box(Modifier.size(36.dp).clip(CircleShape).pressable { c.selectPart(-1) }, contentAlignment = Alignment.Center) {
             Icon(Icons.Outlined.Close, "Deselect", tint = p.muted, modifier = Modifier.size(18.dp))
         }
@@ -288,6 +293,10 @@ fun ExportPanel(c: ViewerController, p: Palette, onPickFolder: (Int, Boolean) ->
             PillChip("OBJ + MTL + textures", format == 0, p) { format = 0 }
             PillChip("STL", format == 1, p) { format = 1 }
         }
+        if (c.canEdit) {
+            VSpace(6.dp)
+            PillChip("GLB · parts with pivots", format == 3, p) { format = 3 }
+        }
         if (c.parts.size > 1 && c.canEdit) {
             VSpace(6.dp)
             PillChip("STL · one file per part", format == 2, p) { format = 2 }
@@ -297,6 +306,7 @@ fun ExportPanel(c: ViewerController, p: Palette, onPickFolder: (Int, Boolean) ->
             when (format) {
                 0 -> "Every part is saved as its own object, in place. Textures are copied next to it."
                 1 -> "Binary STL for 3D printing (geometry only), all parts in one file."
+                3 -> "glTF binary for Blender, Unreal and MSFS tools: every part is its own object, with its hinge (or centre) as pivot — ready to animate."
                 else -> "A separate STL for every visible part, each in its original position."
             },
             color = p.muted, fontSize = 12.sp,
@@ -386,5 +396,30 @@ fun ViewsPanel(c: ViewerController, p: Palette, onClose: () -> Unit) {
                 }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------- view presets
+
+@Composable
+fun CameraPanel(c: ViewerController, p: Palette, onClose: () -> Unit) {
+    PanelShell("View", "Look straight at the model from any side", p, onClose) {
+        val names = listOf("Top", "Bottom", "Front", "Back", "Left", "Right")
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            names.chunked(3).forEachIndexed { row, trio ->
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    trio.forEachIndexed { col, n ->
+                        Box(
+                            Modifier.weight(1f).clip(RoundedCornerShape(14.dp)).background(p.glass)
+                                .border(1.dp, p.border, RoundedCornerShape(14.dp))
+                                .pressable { c.viewPreset(row * 3 + col) }.padding(vertical = 12.dp),
+                            contentAlignment = Alignment.Center,
+                        ) { Text(n, color = p.text, fontWeight = FontWeight.SemiBold, fontSize = 14.sp) }
+                    }
+                }
+            }
+        }
+        VSpace(10.dp)
+        SwitchRow("Flat view (no perspective)", "Straight lines stay straight — best for drawing cuts", c.ortho, true, p) { c.toggleOrtho() }
     }
 }

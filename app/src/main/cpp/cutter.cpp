@@ -23,6 +23,21 @@ struct Renderer::CutCam {
     double R[9];  // model-view rotation (row-major, view = R * model + t)
     V3 eye, fwd;
     double W = 1, H = 1, tanHalf = 1, aspect = 1, radius = 1;
+    bool ortho = false;
+    double hw = 1;  // flat view: half height of the view in model units
+    V3 right, up;
+    V3 center;
+    /** Ray through a screen point (origin, direction) in model space. */
+    void ray(double sx, double sy, V3& o, V3& d) const {
+        double ndcX = 2.0 * sx / W - 1.0, ndcY = 1.0 - 2.0 * sy / H;
+        if (ortho) {
+            o = eye + right * (ndcX * hw * aspect) + up * (ndcY * hw);
+            d = fwd;
+            return;
+        }
+        o = eye;
+        d = (right * (ndcX * tanHalf * aspect) + up * (ndcY * tanHalf) + fwd).norm();
+    }
 };
 
 namespace {
@@ -234,7 +249,8 @@ bool Renderer::cutCamera(CutCam& cc) {
     double dc = (eyeW - center).len();
     double far = dc + radius * 8.4;
     double nearP = std::max(dc - radius * 1.05, far * 2e-5);
-    M4 proj = perspective(kFovC, (double)w_ / (double)h_, nearP, far);
+    if (f.ortho) nearP = std::max(dc - radius * 1.5, far * 1e-4);
+    M4 proj = projection(f, w_, h_, nearP, far);
     M4 mv = view * (f.upZ ? rotX(-M_PI / 2) : M4::identity());
     cc.mvp = proj * mv;
     // column-major mv: R[row][col] = m[col*4+row]
@@ -250,7 +266,24 @@ bool Renderer::cutCamera(CutCam& cc) {
     cc.tanHalf = std::tan(kFovC / 2);
     cc.aspect = (double)w_ / (double)h_;
     cc.radius = radius;
+    cc.ortho = f.ortho;
+    cc.hw = cam.dist * cc.tanHalf;
+    cc.right = V3(cc.R[0], cc.R[1], cc.R[2]);
+    cc.up = V3(cc.R[3], cc.R[4], cc.R[5]);
+    {
+        std::lock_guard<std::mutex> l(mu_);
+        const Bounds& b = bounds_;
+        cc.center = b.valid() ? V3((b.mn[0] + b.mx[0]) / 2, (b.mn[1] + b.mx[1]) / 2, (b.mn[2] + b.mx[2]) / 2) : V3();
+    }
     return true;
+}
+
+double Renderer::pixelsPerUnit() {
+    CutCam cc;
+    if (!cutCamera(cc)) return 1;
+    if (cc.ortho) return cc.H / (2 * cc.hw);
+    double depth = std::max(1e-9, (cc.center - cc.eye).dot(cc.fwd));
+    return cc.H / (2 * depth * cc.tanHalf);
 }
 
 static bool projectCC(const Renderer::CutCam& cc, const float* p, double& sx, double& sy) {
@@ -287,20 +320,11 @@ void Renderer::unproject(const float* xy, int n, float* out) {
         for (int i = 0; i < n * 3; i++) out[i] = 0;
         return;
     }
-    Bounds b;
-    {
-        std::lock_guard<std::mutex> l(mu_);
-        b = bounds_;
-    }
-    V3 center = b.valid() ? V3((b.mn[0] + b.mx[0]) / 2, (b.mn[1] + b.mx[1]) / 2, (b.mn[2] + b.mx[2]) / 2) : V3();
-    double planeD = (center - cc.eye).dot(cc.fwd);
     for (int i = 0; i < n; i++) {
-        double ndcX = 2.0 * xy[i * 2] / cc.W - 1.0, ndcY = 1.0 - 2.0 * xy[i * 2 + 1] / cc.H;
-        double dv[3] = {ndcX * cc.tanHalf * cc.aspect, ndcY * cc.tanHalf, -1.0};
-        V3 d(cc.R[0] * dv[0] + cc.R[3] * dv[1] + cc.R[6] * dv[2], cc.R[1] * dv[0] + cc.R[4] * dv[1] + cc.R[7] * dv[2],
-             cc.R[2] * dv[0] + cc.R[5] * dv[1] + cc.R[8] * dv[2]);
-        double t = planeD / std::max(1e-9, d.dot(cc.fwd));
-        V3 p = cc.eye + d * t;
+        V3 o, d;
+        cc.ray(xy[i * 2], xy[i * 2 + 1], o, d);
+        double t = (cc.center - o).dot(cc.fwd) / std::max(1e-9, d.dot(cc.fwd));
+        V3 p = o + d * t;
         out[i * 3] = (float)p.x;
         out[i * 3 + 1] = (float)p.y;
         out[i * 3 + 2] = (float)p.z;
@@ -310,11 +334,8 @@ void Renderer::unproject(const float* xy, int n, float* out) {
 bool Renderer::snapPoint(float sx, float sy, float snapPx, bool corners, bool edges, float outP[3]) {
     CutCam cc;
     if (!cutCamera(cc)) return false;
-    double ndcX = 2.0 * sx / cc.W - 1.0, ndcY = 1.0 - 2.0 * sy / cc.H;
-    double dv[3] = {ndcX * cc.tanHalf * cc.aspect, ndcY * cc.tanHalf, -1.0};
-    V3 d(cc.R[0] * dv[0] + cc.R[3] * dv[1] + cc.R[6] * dv[2], cc.R[1] * dv[0] + cc.R[4] * dv[1] + cc.R[7] * dv[2],
-         cc.R[2] * dv[0] + cc.R[5] * dv[1] + cc.R[8] * dv[2]);
-    d = d.norm();
+    V3 o, d;
+    cc.ray(sx, sy, o, d);
     std::vector<uint8_t> hidden;
     {
         std::lock_guard<std::mutex> l(mu_);
@@ -323,7 +344,6 @@ bool Renderer::snapPoint(float sx, float sy, float snapPx, bool corners, bool ed
     std::lock_guard<std::mutex> dl(dataMu_);
     double best = 1e300;
     V3 hitTri[3];
-    const V3 o = cc.eye;
     for (auto& cp : cpu_) {
         const Chunk& c = *cp;
         if (c.points) continue;
@@ -471,9 +491,19 @@ Renderer::CutResult Renderer::cut(const CutRequest& req, Sink* sink) {
         size_t j = (i + 1) % n;
         V3 a(R.points[i * 3] - cc.eye.x, R.points[i * 3 + 1] - cc.eye.y, R.points[i * 3 + 2] - cc.eye.z);
         V3 b(R.points[j * 3] - cc.eye.x, R.points[j * 3 + 1] - cc.eye.y, R.points[j * 3 + 2] - cc.eye.z);
-        V3 nn = a.cross(b).norm();
-        planes[i].n = nn;
-        planes[i].d = -nn.dot(cc.eye);
+        V3 nn;
+        if (cc.ortho) {
+            // flat view: walls run straight along the view direction
+            V3 A(R.points[i * 3], R.points[i * 3 + 1], R.points[i * 3 + 2]);
+            V3 B(R.points[j * 3], R.points[j * 3 + 1], R.points[j * 3 + 2]);
+            nn = (B - A).cross(cc.fwd).norm();
+            planes[i].n = nn;
+            planes[i].d = -nn.dot(A);
+        } else {
+            nn = a.cross(b).norm();
+            planes[i].n = nn;
+            planes[i].d = -nn.dot(cc.eye);
+        }
         segBox[i * 4] = std::min(lasso[i * 2], lasso[j * 2]);
         segBox[i * 4 + 1] = std::min(lasso[i * 2 + 1], lasso[j * 2 + 1]);
         segBox[i * 4 + 2] = std::max(lasso[i * 2], lasso[j * 2]);
@@ -511,7 +541,8 @@ Renderer::CutResult Renderer::cut(const CutRequest& req, Sink* sink) {
     std::vector<std::vector<CV>> polys, next;
     for (auto& cp : cpu_) {
         const Chunk& c = *cp;
-        bool skip = c.points || c.tris.empty() || (c.part >= 0 && c.part < (int)hidden.size() && hidden[c.part]);
+        bool skip = c.points || c.tris.empty() || (c.part >= 0 && c.part < (int)hidden.size() && hidden[c.part]) ||
+                    (req.onlyPart >= 0 && c.part != req.onlyPart);
         if (!skip) {
             // quick reject: chunk entirely outside the lasso box
             double cminx = 1e300, cminy = 1e300, cmaxx = -1e300, cmaxy = -1e300;
@@ -634,28 +665,43 @@ Renderer::CutResult Renderer::cut(const CutRequest& req, Sink* sink) {
                 }
             }
         }
-        std::unordered_map<uint32_t, std::pair<double, int64_t>> comp;  // root -> (depth sum, count)
+        struct Comp { double sum = 0, mn = 1e300, mx = -1e300; int64_t count = 0; };
+        std::unordered_map<uint32_t, Comp> comp;
         for (uint32_t i = 0; i < tris.size(); i++) {
             const Work& w = works[tris[i].w];
-            double dsum = 0;
+            auto& e = comp[find(i)];
             for (int k = 0; k < 3; k++) {
                 const float* p = w.verts[w.cut[tris[i].t + k]].p;
-                dsum += (V3(p[0], p[1], p[2]) - cc.eye).dot(cc.fwd);
+                double dd = (V3(p[0], p[1], p[2]) - cc.eye).dot(cc.fwd);
+                e.sum += dd / 3;
+                e.mn = std::min(e.mn, dd);
+                e.mx = std::max(e.mx, dd);
             }
-            auto& e = comp[find(i)];
-            e.first += dsum / 3;
-            e.second++;
+            e.count++;
         }
-        std::vector<std::pair<double, uint32_t>> order;  // mean depth, root
+        struct Ord { double mean, mn, mx; uint32_t root; };
+        std::vector<Ord> order;
         for (auto& kv : comp) {
-            if (kv.second.second < 2 && comp.size() > 1) continue;  // ignore specks
-            order.push_back({kv.second.first / kv.second.second, kv.first});
+            if (kv.second.count < 2 && comp.size() > 1) continue;  // ignore specks
+            order.push_back({kv.second.sum / kv.second.count, kv.second.mn, kv.second.mx, kv.first});
         }
-        std::sort(order.begin(), order.end());
+        std::sort(order.begin(), order.end(), [&](const Ord& a, const Ord& b) {
+            return req.mode == 3 ? a.mn < b.mn : a.mean < b.mean;
+        });
         std::unordered_map<uint32_t, bool> chosen;
-        if (!order.empty()) chosen[order[0].second] = true;
-        if (req.mode == 2 && order.size() > 1 && order[1].first - order[0].first < cc.radius * 0.12)
-            chosen[order[1].second] = true;
+        if (!order.empty()) chosen[order[0].root] = true;
+        if (req.mode == 2 && order.size() > 1 && order[1].mean - order[0].mean < cc.radius * 0.12)
+            chosen[order[1].root] = true;
+        if (req.mode == 3) {
+            // the first object: every layer that touches the nearest one in depth (top + bottom skin of a wing),
+            // stopping at the first clear gap (e.g. the other wing or the fuselage behind)
+            double reach = order.empty() ? 0 : order[0].mx;
+            for (size_t k = 1; k < order.size(); k++) {
+                if (order[k].mn - reach > cc.radius * 0.04) break;
+                chosen[order[k].root] = true;
+                reach = std::max(reach, order[k].mx);
+            }
+        }
         std::vector<std::vector<uint32_t>> newCut(works.size());
         for (uint32_t i = 0; i < tris.size(); i++) {
             Work& w = works[tris[i].w];
@@ -858,6 +904,66 @@ Renderer::CutResult Renderer::cut(const CutRequest& req, Sink* sink) {
     sink->log(0, "Cut \"" + req.name + "\": " + std::to_string(cutTris) + " triangles moved to the new part, " +
                      std::to_string(caps.size()) + " triangles added to seal the cut.");
     return res;
+}
+
+void Renderer::deletePart(int part, Sink* sink) {
+    std::lock_guard<std::mutex> dl(dataMu_);
+    std::vector<std::shared_ptr<Chunk>> keep;
+    for (auto& c : cpu_) if (c->part != part) keep.push_back(c);
+    cpu_.swap(keep);
+    rebuildGpu_ = true;
+    recomputeParts(sink);
+}
+
+int Renderer::detectMirrorAxis() {
+    Bounds b;
+    {
+        std::lock_guard<std::mutex> l(mu_);
+        b = bounds_;
+    }
+    if (!b.valid()) return 0;
+    std::lock_guard<std::mutex> dl(dataMu_);
+    // voxel grid of surface vertices; score each axis by how many mirrored samples land near a vertex
+    double size = std::max({b.mx[0] - b.mn[0], b.mx[1] - b.mn[1], b.mx[2] - b.mn[2]});
+    if (size <= 0) return 0;
+    double cell = size / 96.0;
+    std::unordered_map<uint64_t, uint8_t> grid;
+    auto key = [&](double x, double y, double z) {
+        int64_t i = (int64_t)std::floor((x - b.mn[0]) / cell), j = (int64_t)std::floor((y - b.mn[1]) / cell),
+                k = (int64_t)std::floor((z - b.mn[2]) / cell);
+        return (uint64_t)((i & 0x1FFFFF) | ((j & 0x1FFFFF) << 21) | ((k & 0x1FFFFF) << 42));
+    };
+    std::vector<V3> samples;
+    size_t total = 0;
+    for (auto& c : cpu_) total += c->verts.size();
+    size_t stride = std::max<size_t>(1, total / 4000);
+    size_t idx = 0;
+    for (auto& c : cpu_) {
+        for (auto& v : c->verts) {
+            grid[key(v.p[0], v.p[1], v.p[2])] = 1;
+            if (idx++ % stride == 0) samples.emplace_back(v.p[0], v.p[1], v.p[2]);
+        }
+    }
+    int bestAxis = 0;
+    double bestScore = -1;
+    for (int ax = 0; ax < 3; ax++) {
+        double c = (b.mn[ax] + b.mx[ax]) / 2;
+        int hit = 0;
+        for (auto& p : samples) {
+            V3 m = p;
+            double* v = ax == 0 ? &m.x : ax == 1 ? &m.y : &m.z;
+            *v = 2 * c - *v;
+            bool found = false;
+            for (int dx = -1; dx <= 1 && !found; dx++)
+                for (int dy = -1; dy <= 1 && !found; dy++)
+                    for (int dz = -1; dz <= 1 && !found; dz++)
+                        if (grid.count(key(m.x + dx * cell, m.y + dy * cell, m.z + dz * cell))) found = true;
+            if (found) hit++;
+        }
+        double score = (double)hit / std::max<size_t>(1, samples.size());
+        if (score > bestScore) { bestScore = score; bestAxis = ax; }
+    }
+    return bestAxis;
 }
 
 bool Renderer::undoCut(Sink* sink) {

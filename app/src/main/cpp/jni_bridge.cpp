@@ -212,9 +212,72 @@ JNIEXPORT jfloatArray JNICALL FN(nativeUnproject)(JNIEnv* env, jobject, jlong h,
     return a;
 }
 
+JNIEXPORT void JNICALL FN(nativeSetOrtho)(JNIEnv*, jobject, jlong h, jboolean o) { E(h)->renderer.setOrtho(o); }
+JNIEXPORT void JNICALL FN(nativeViewPreset)(JNIEnv*, jobject, jlong h, jint v) { E(h)->renderer.viewPreset(v); }
+JNIEXPORT void JNICALL FN(nativeSetPartHinge)(JNIEnv* env, jobject, jlong h, jint part, jfloatArray a, jfloatArray b, jfloat deg) {
+    float pa[3] = {0, 0, 0}, pb[3] = {0, 0, 0};
+    if (a && env->GetArrayLength(a) >= 3) env->GetFloatArrayRegion(a, 0, 3, pa);
+    if (b && env->GetArrayLength(b) >= 3) env->GetFloatArrayRegion(b, 0, 3, pb);
+    E(h)->renderer.setPartHinge(part, pa, pb, deg);
+}
+JNIEXPORT void JNICALL FN(nativeDeletePart)(JNIEnv*, jobject, jlong h, jint part) {
+    auto s = E(h)->sink();
+    E(h)->renderer.deletePart(part, s.get());
+}
+JNIEXPORT jint JNICALL FN(nativeDetectMirrorAxis)(JNIEnv*, jobject, jlong h) { return E(h)->renderer.detectMirrorAxis(); }
+JNIEXPORT jdouble JNICALL FN(nativePixelsPerUnit)(JNIEnv*, jobject, jlong h) { return E(h)->renderer.pixelsPerUnit(); }
+
+JNIEXPORT jstring JNICALL FN(nativeExportGlb)(JNIEnv* env, jobject, jlong h, jint fd, jfloatArray pivots,
+                                              jobjectArray images, jobjectArray mimes, jbooleanArray hidden) {
+    std::vector<float> pv;
+    if (pivots) {
+        jsize n = env->GetArrayLength(pivots);
+        pv.resize(n);
+        if (n) env->GetFloatArrayRegion(pivots, 0, n, pv.data());
+    }
+    std::vector<std::vector<uint8_t>> imgs;
+    std::vector<std::string> mm;
+    if (images) {
+        jsize n = env->GetArrayLength(images);
+        for (jsize i = 0; i < n; i++) {
+            auto arr = (jbyteArray)env->GetObjectArrayElement(images, i);
+            std::vector<uint8_t> d;
+            if (arr) {
+                jsize len = env->GetArrayLength(arr);
+                d.resize(len);
+                if (len) env->GetByteArrayRegion(arr, 0, len, (jbyte*)d.data());
+                env->DeleteLocalRef(arr);
+            }
+            imgs.push_back(std::move(d));
+            std::string m;
+            if (mimes && i < env->GetArrayLength(mimes)) {
+                auto js = (jstring)env->GetObjectArrayElement(mimes, i);
+                if (js) {
+                    const char* c = env->GetStringUTFChars(js, nullptr);
+                    m = c;
+                    env->ReleaseStringUTFChars(js, c);
+                    env->DeleteLocalRef(js);
+                }
+            }
+            mm.push_back(m);
+        }
+    }
+    std::vector<uint8_t> hid;
+    if (hidden) {
+        jsize n = env->GetArrayLength(hidden);
+        std::vector<jboolean> b(n);
+        if (n) env->GetBooleanArrayRegion(hidden, 0, n, b.data());
+        for (auto x : b) hid.push_back(x ? 1 : 0);
+    }
+    auto s = E(h)->sink();
+    std::string err = E(h)->renderer.exportGlb(fd, pv, imgs, mm, hid, s.get());
+    return env->NewStringUTF(safeUtf8(err).c_str());
+}
+
 JNIEXPORT jstring JNICALL FN(nativeCut)(JNIEnv* env, jobject, jlong h, jfloatArray pts, jint mode, jstring name,
-                                        jint mirrorAxis, jboolean keepUndo) {
+                                        jint mirrorAxis, jboolean keepUndo, jint onlyPart) {
     Renderer::CutRequest req;
+    req.onlyPart = onlyPart;
     req.mirrorAxis = mirrorAxis;
     req.keepUndo = keepUndo;
     jsize n = env->GetArrayLength(pts);

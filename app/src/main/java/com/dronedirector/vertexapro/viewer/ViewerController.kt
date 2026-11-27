@@ -141,7 +141,7 @@ class ViewerController(
         private set
     var cutActive by mutableStateOf(false)
         private set
-    var cutMode by mutableIntStateOf(0)
+    var cutMode by mutableIntStateOf(3)
     val cutPoints = androidx.compose.runtime.mutableStateListOf<FloatArray>()
     /** Points, Curve, Freehand, Rectangle or Ellipse (see CutGeometry). */
     var cutShape by mutableIntStateOf(CutGeometry.POINTS)
@@ -149,6 +149,24 @@ class ViewerController(
     var straightOn by mutableStateOf(false)
     var mirrorCut by mutableStateOf(false)
     var mirrorAxis by mutableIntStateOf(0)
+    var mirrorAuto by mutableStateOf(true)
+    /** Gap between a cut part and the model, in millimetres (0 = none). */
+    var gapMm by mutableFloatStateOf(0f)
+    // flap template (trailing-edge strip)
+    var flapDepth by mutableFloatStateOf(0.25f)
+    var flapPreview by mutableStateOf(FloatArray(0))
+        private set
+    private var flapJob: Job? = null
+    // camera
+    var ortho by mutableStateOf(false)
+        private set
+    // hinges: part -> hinge line and deflection
+    data class Hinge(val a: FloatArray, val b: FloatArray, val deg: Float)
+    var hinges by mutableStateOf<Map<Int, Hinge>>(emptyMap())
+        private set
+    var hingePart by mutableIntStateOf(-1)
+        private set
+    val hingePoints = androidx.compose.runtime.mutableStateListOf<FloatArray>()
     /** Live stroke while drawing a freehand / rectangle / ellipse shape (screen pixels). */
     var drawPath by mutableStateOf(FloatArray(0))
         private set
@@ -527,6 +545,8 @@ class ViewerController(
     // ---------------------------------------------------------------- cut tool
     fun onTap(x: Float, y: Float) {
         when {
+            hingePart >= 0 -> addHingePoint(x, y)
+            cutActive && cutShape == CutGeometry.FLAP -> addFlapPoint(x, y)
             cutActive -> addCutPoint(x, y)
             measureActive -> addMeasurePoint(x, y)
             else -> pick(x, y)
@@ -650,12 +670,17 @@ class ViewerController(
         lastCut = null
         selectPart(-1)
         cutHint = com.dronedirector.vertexapro.ui.shapeHint(cutShape)
+        if (mirrorAuto) scope.launch {
+            val ax = withContext(Dispatchers.Default) { safe { NativeBridge.nativeDetectMirrorAxis(handle) } }
+            if (ax != null) mirrorAxis = ax
+        }
         safe { NativeBridge.nativeSetAutoRotate(handle, false) }
         autoRotate = false
     }
 
     fun cancelCut() {
         cutActive = false
+        flapPreview = FloatArray(0)
         cutPoints.clear()
         clearOutlineHistory()
         askConnect = false
@@ -751,7 +776,7 @@ class ViewerController(
     }
 
     /** True while one-finger drags draw a shape instead of rotating the view. */
-    fun isDrawMode() = cutActive && cutShape >= CutGeometry.FREEHAND && !askConnect && !createPartOpen && !cutBusy
+    fun isDrawMode() = cutActive && cutShape in CutGeometry.FREEHAND..CutGeometry.ELLIPSE && !askConnect && !createPartOpen && !cutBusy
 
     fun drawStart(x: Float, y: Float) {
         drawAnchorX = x; drawAnchorY = y
@@ -806,6 +831,173 @@ class ViewerController(
             CutGeometry.smoothClosed(projected, 4f * context.resources.displayMetrics.density)
         else projected
 
+    private fun unitMeters() = when (unit) { 0 -> 1.0; 1 -> 0.01; 2 -> 0.001; 3 -> 0.0254; else -> 0.3048 }
+
+    /** Outer and inner outlines (model space) offset by half the gap each way, built on screen. */
+    private fun gapOutlines(flat: FloatArray, gapUnits: Double): Pair<FloatArray, FloatArray>? {
+        val scr = safe { NativeBridge.nativeProject(handle, flat) } ?: return null
+        if (scr.any { it.isNaN() }) return null
+        val ppu = safe { NativeBridge.nativePixelsPerUnit(handle) } ?: return null
+        val half = (gapUnits * ppu / 2).toFloat()
+        if (half < 0.05f) return null
+        val outer = CutGeometry.offset(scr, half)
+        val inner = CutGeometry.offset(scr, -half)
+        val o = safe { NativeBridge.nativeUnproject(handle, outer) } ?: return null
+        val i = safe { NativeBridge.nativeUnproject(handle, inner) } ?: return null
+        return o to i
+    }
+
+    // ---------------------------------------------------------------- flap template
+    private fun addFlapPoint(x: Float, y: Float) {
+        if (askConnect || createPartOpen || cutBusy) return
+        if (cutPoints.size >= 2) return
+        val density = context.resources.displayMetrics.density
+        scope.launch {
+            val hit = withContext(Dispatchers.Default) { safe { NativeBridge.nativeSnap(handle, x, y, 16 * density, false, true) } }
+            if (hit == null) { cutHint = "Tap right on the wing's trailing edge."; return@launch }
+            pushOutlineHistory()
+            cutPoints.add(hit)
+            cutHint = if (cutPoints.size < 2) "Now tap the trailing edge where the flap ends." else "Set the chord depth, then Use outline."
+            if (cutPoints.size == 2) updateFlapPreview()
+        }
+    }
+
+    fun setFlapDepthValue(d: Float) {
+        flapDepth = d
+        updateFlapPreview()
+    }
+
+    /** Builds the flap outline on screen: from the trailing edge towards the leading edge by the chord depth. */
+    fun updateFlapPreview() {
+        if (cutPoints.size < 2) { flapPreview = FloatArray(0); return }
+        flapJob?.cancel()
+        flapJob = scope.launch {
+            delay(60)
+            val poly = withContext(Dispatchers.Default) { buildFlapOutline() }
+            flapPreview = poly ?: FloatArray(0)
+            if (poly == null) cutHint = "Couldn't find the wing behind those points — try the Top view."
+        }
+    }
+
+    private fun buildFlapOutline(): FloatArray? {
+        val pr = projectCutPoints()
+        if (pr.size < 4 || pr.any { it.isNaN() }) return null
+        val ax = pr[0]; val ay = pr[1]; val bx = pr[2]; val by = pr[3]
+        val len = kotlin.math.hypot(bx - ax, by - ay)
+        if (len < 4f) return null
+        var nx = -(by - ay) / len
+        var ny = (bx - ax) / len
+        fun hits(x: Float, y: Float) = safe { NativeBridge.nativeRaycast(handle, x, y) } != null
+        val mx = (ax + bx) / 2
+        val my = (ay + by) / 2
+        if (!hits(mx + nx * 12, my + ny * 12)) { nx = -nx; ny = -ny }
+        if (!hits(mx + nx * 12, my + ny * 12)) return null
+        // chord length on screen: grow until we leave the wing, then binary search the edge
+        fun chord(px: Float, py: Float): Float {
+            var lo = 0f
+            var hi = 8f
+            while (hi < 6000f && hits(px + nx * hi, py + ny * hi)) { lo = hi; hi *= 2 }
+            repeat(14) {
+                val mid = (lo + hi) / 2
+                if (hits(px + nx * mid, py + ny * mid)) lo = mid else hi = mid
+            }
+            return lo
+        }
+        val inset = 0.03f * len
+        val ca = chord(ax + (bx - ax) / len * inset + nx * 4, ay + (by - ay) / len * inset + ny * 4)
+        val cb = chord(bx - (bx - ax) / len * inset + nx * 4, by - (by - ay) / len * inset + ny * 4)
+        if (ca < 4f || cb < 4f) return null
+        val da = ca * flapDepth
+        val db = cb * flapDepth
+        val ext = 14f * context.resources.displayMetrics.density  // reach past the trailing edge so the cut runs clean
+        return floatArrayOf(
+            ax - nx * ext, ay - ny * ext,
+            bx - nx * ext, by - ny * ext,
+            bx + nx * db, by + ny * db,
+            ax + nx * da, ay + ny * da,
+        )
+    }
+
+    fun useFlapOutline() {
+        val poly = flapPreview
+        if (poly.size < 8) return
+        val pts3 = safe { NativeBridge.nativeUnproject(handle, poly) } ?: return
+        pushOutlineHistory()
+        cutPoints.clear()
+        for (i in 0 until pts3.size / 3) cutPoints.add(floatArrayOf(pts3[i * 3], pts3[i * 3 + 1], pts3[i * 3 + 2]))
+        flapPreview = FloatArray(0)
+        cutShape = CutGeometry.POINTS  // the outline is now a normal polygon
+        cutMode = 3
+        createPartOpen = true
+    }
+
+    // ---------------------------------------------------------------- camera presets
+    fun viewPreset(i: Int) {
+        safe { NativeBridge.nativeViewPreset(handle, i) }
+        view?.requestRender()
+    }
+
+    fun toggleOrtho() {
+        ortho = !ortho
+        safe { NativeBridge.nativeSetOrtho(handle, ortho) }
+        view?.requestRender()
+    }
+
+    // ---------------------------------------------------------------- hinges
+    fun startHinge(part: Int) {
+        if (cutActive) cancelCut()
+        if (measureActive) toggleMeasure()
+        hingePart = part
+        hingePoints.clear()
+        hinges[part]?.let { hingePoints.add(it.a); hingePoints.add(it.b) }
+    }
+
+    fun endHinge() {
+        hingePart = -1
+        hingePoints.clear()
+        view?.requestRender()
+    }
+
+    private fun addHingePoint(x: Float, y: Float) {
+        val part = hingePart
+        val density = context.resources.displayMetrics.density
+        scope.launch {
+            val hit = withContext(Dispatchers.Default) { safe { NativeBridge.nativeSnap(handle, x, y, 16 * density, true, true) } } ?: return@launch
+            if (hingePoints.size >= 2) hingePoints.clear()
+            hingePoints.add(hit)
+            if (hingePoints.size == 2) {
+                hinges = hinges + (part to Hinge(hingePoints[0], hingePoints[1], 0f))
+                applyHinge(part)
+            }
+        }
+    }
+
+    fun setDeflection(part: Int, deg: Float) {
+        val h = hinges[part] ?: return
+        hinges = hinges + (part to h.copy(deg = deg))
+        applyHinge(part)
+    }
+
+    fun removeHinge(part: Int) {
+        hinges = hinges - part
+        safe { NativeBridge.nativeSetPartHinge(handle, part, FloatArray(3), FloatArray(3), Float.NaN) }
+        hingePoints.clear()
+        view?.requestRender()
+    }
+
+    private fun applyHinge(part: Int) {
+        val h = hinges[part] ?: return
+        safe { NativeBridge.nativeSetPartHinge(handle, part, h.a, h.b, h.deg) }
+        view?.requestRender()
+    }
+
+    fun projectHingePoints(): FloatArray {
+        if (hingePoints.isEmpty()) return FloatArray(0)
+        val flat = FloatArray(hingePoints.size * 3)
+        hingePoints.forEachIndexed { i, p -> System.arraycopy(p, 0, flat, i * 3, 3) }
+        return safe { NativeBridge.nativeProject(handle, flat) } ?: FloatArray(0)
+    }
+
     fun connectOutline() {
         askConnect = false
         if (cutPoints.size >= 3) createPartOpen = true
@@ -818,12 +1010,24 @@ class ViewerController(
         cutBusy = true
         val flat = cutOutline()
         val mirror = if (mirrorCut) mirrorAxis else -1
+        // gap: cut a slightly bigger outline, then the real part from inside it, and drop the thin band between
+        val gapUnits = gapMm / 1000.0 / unitMeters()
+        val outlines: Pair<FloatArray, FloatArray>? = if (gapUnits > 0) gapOutlines(flat, gapUnits) else null
         scope.launch {
             val r = withContext(Dispatchers.Default) {
-                val first = safe { NativeBridge.nativeCut(handle, flat, mode, name, -1, true) } ?: "ERR|Cancelled"
+                fun one(pName: String, mirrorAx: Int, keepUndo: Boolean): String {
+                    if (outlines == null) return safe { NativeBridge.nativeCut(handle, flat, mode, pName, mirrorAx, keepUndo, -1) } ?: "ERR|Cancelled"
+                    val outer = safe { NativeBridge.nativeCut(handle, outlines.first, mode, "$pName (gap)", mirrorAx, keepUndo, -1) } ?: "ERR|Cancelled"
+                    if (outer.startsWith("ERR|")) return outer
+                    val tmp = outer.substringBefore('|').toIntOrNull() ?: return outer
+                    val inner = safe { NativeBridge.nativeCut(handle, outlines.second, mode, pName, mirrorAx, false, tmp) } ?: "ERR|Cancelled"
+                    safe { NativeBridge.nativeDeletePart(handle, tmp) }
+                    return inner
+                }
+                val first = one(name, -1, true)
                 if (mirror >= 0 && !first.startsWith("ERR|")) {
-                    val second = safe { NativeBridge.nativeCut(handle, flat, mode, "$name (mirror)", mirror, false) }
-                    if (second != null && second.startsWith("ERR|")) cutHint = "Mirror side: " + second.removePrefix("ERR|")
+                    val second = one("$name (mirror)", mirror, false)
+                    if (second.startsWith("ERR|")) cutHint = "Mirror side: " + second.removePrefix("ERR|")
                 }
                 first
             }
@@ -1026,7 +1230,7 @@ class ViewerController(
 
     // ---------------------------------------------------------------- export
     fun export(tree: Uri, format: Int, visibleOnly: Boolean) {
-        job = JobState("Saving ${if (format == 0) "OBJ" else "STL"}", if (canEdit) 0.5f else 0f)
+        job = JobState("Saving ${when (format) { 0 -> "OBJ"; 3 -> "GLB"; else -> "STL" }}", if (canEdit) 0.5f else 0f)
         val namesByMat = safe { NativeBridge.nativeMaterialTextures(handle) } ?: emptyArray()
         val hidden = BooleanArray((parts.maxOfOrNull { it.index } ?: -1) + 1) { visibleOnly && it in hiddenParts }
         val poll = scope.launch {
@@ -1037,11 +1241,14 @@ class ViewerController(
             }
         }
         val partNames = parts.associate { it.index to it.name }
+        val pivotCount = (parts.maxOfOrNull { it.index } ?: -1) + 1
+        val pivots = FloatArray(pivotCount * 3) { Float.NaN }
+        hinges.forEach { (part, h) -> if (part < pivotCount) System.arraycopy(h.a, 0, pivots, part * 3, 3) }
         scope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
                     Exporter.export(context, handle, tree, loadSource, resolver, format, hidden, namesByMat, splitLoose,
-                        fromMemory = canEdit, partNames = partNames)
+                        fromMemory = canEdit, partNames = partNames, pivots = pivots)
                 }
             }
             poll.cancel()

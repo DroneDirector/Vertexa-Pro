@@ -36,6 +36,7 @@ add_library(vertexa SHARED
     exporter.cpp
     renderer.cpp
     cutter.cpp
+    glb.cpp
     loader_obj.cpp
     loader_stl.cpp
     loader_ply.cpp
