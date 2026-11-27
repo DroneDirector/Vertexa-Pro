@@ -186,6 +186,13 @@ class InstallReceiver : BroadcastReceiver() {
             }
             PackageInstaller.STATUS_SUCCESS -> UpdateManager.installStatus.value = "ok"
             PackageInstaller.STATUS_FAILURE_ABORTED -> UpdateManager.installStatus.value = "aborted"
+            PackageInstaller.STATUS_FAILURE_CONFLICT, PackageInstaller.STATUS_FAILURE_INCOMPATIBLE -> {
+                val msg = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE).orEmpty()
+                UpdateManager.installStatus.value = if ("signature" in msg.lowercase() || "UPDATE_INCOMPATIBLE" in msg) {
+                    "This version is signed with a different key than the one installed, so Android won't update over it. " +
+                        "Uninstall Vertexa Pro once and install the new version from GitHub — after that, updates work in the app."
+                } else msg.ifEmpty { "The update could not be installed." }
+            }
             else -> UpdateManager.installStatus.value =
                 intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE) ?: "The update could not be installed."
         }
