@@ -2,6 +2,8 @@
 
 ## Next
 
+- Undo and Redo while drawing the cut outline (every point or drawn shape, before you create the part)
+- Redo for a cut you've undone
 - Opening the Parts panel on a model that is one single mesh splits it into its loose pieces automatically
 
 ## Cut tool, measure, animation and saved views
