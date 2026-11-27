@@ -66,6 +66,7 @@ public:
     bool canEdit() { std::lock_guard<std::mutex> l(dataMu_); return keepCpu_ && !cpu_.empty() && !animated_; }
     CutResult cut(const CutRequest& req, Sink* sink);
     bool undoCut(Sink* sink);
+    bool redoCut(Sink* sink);
     bool hasUndo() { std::lock_guard<std::mutex> l(dataMu_); return !undo_.empty(); }
     /** Ray from a screen point; returns true and the model-space hit point. */
     bool raycast(float sx, float sy, float out[3]);
@@ -225,6 +226,7 @@ private:
     std::mutex dataMu_;
     std::vector<std::shared_ptr<Chunk>> cpu_;   // geometry kept for editing and saving
     std::vector<std::shared_ptr<Chunk>> undo_;  // geometry before the last cut
+    std::vector<std::shared_ptr<Chunk>> redo_;  // geometry after an undone cut
     bool keepCpu_ = true;
     bool animated_ = false;
     std::shared_ptr<AnimData> anim_;

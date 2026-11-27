@@ -272,6 +272,7 @@ void Renderer::clearModel() {
         std::lock_guard<std::mutex> dl(dataMu_);
         cpu_.clear();
         undo_.clear();
+        redo_.clear();
         cpuBytes_ = 0;
         keepCpu_ = true;
         rebuildGpu_ = false;
@@ -323,6 +324,7 @@ void Renderer::upload(std::unique_ptr<Chunk> c) {
         keepCpu_ = false;  // too big to keep a second copy: viewing still works, editing doesn't
         cpu_.clear();
         undo_.clear();
+        redo_.clear();
         cpuBytes_ = 0;
         return;
     }

@@ -26,6 +26,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.Redo
 import androidx.compose.material.icons.automirrored.outlined.Undo
 import androidx.compose.material.icons.outlined.ContentCut
 import androidx.compose.material.icons.outlined.Link
@@ -172,7 +173,7 @@ fun CutToolbar(c: ViewerController, p: Palette) {
         ) {
             listOf("Points", "Curve", "Freehand", "Rectangle", "Ellipse").forEachIndexed { i, label ->
                 PillChip(label, c.cutShape == i, p) {
-                    if (c.cutShape != i) { c.cutShape = i; c.cutPoints.clear(); c.cutHint = shapeHint(i) }
+                    if (c.cutShape != i) { c.cutShape = i; c.cutHint = shapeHint(i) }
                 }
             }
         }
@@ -185,7 +186,8 @@ fun CutToolbar(c: ViewerController, p: Palette) {
         }
         VSpace(8.dp)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            if (c.cutShape <= 1) PillChip("Undo point", false, p, trailing = null) { c.undoCutPoint() }
+            ToolIcon(Icons.AutoMirrored.Outlined.Undo, "Undo", c.canUndoPoint, p) { c.undoCutPoint() }
+            ToolIcon(Icons.AutoMirrored.Outlined.Redo, "Redo", c.canRedoPoint, p) { c.redoCutPoint() }
             if (c.cutShape <= 1 && c.cutPoints.size >= 3) PillChip("Close outline", false, p) { c.askConnect = true }
             Spacer(Modifier.weight(1f))
             PillChip("Cancel", false, p) { c.cancelCut() }
@@ -326,7 +328,34 @@ fun LastCutBar(c: ViewerController, p: Palette) {
                 Text("Undo", color = p.accent, fontWeight = FontWeight.Bold, fontSize = 13.sp)
             }
         }
+        if (c.hasRedo) {
+            Row(
+                Modifier.clip(RoundedCornerShape(50)).pressable { c.redoLastCut() }.padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.AutoMirrored.Outlined.Redo, null, tint = p.accent, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("Redo", color = p.accent, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+            }
+        }
         PillChip("OK", false, p) { c.lastCut = null }
+    }
+}
+
+@Composable
+private fun ToolIcon(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, enabled: Boolean, p: Palette, onClick: () -> Unit) {
+    val fg = if (enabled) p.text else p.muted.copy(alpha = 0.5f)
+    Row(
+        Modifier.clip(RoundedCornerShape(50))
+            .background(if (enabled) p.glass else Color.Transparent)
+            .border(1.dp, p.border, RoundedCornerShape(50))
+            .then(if (enabled) Modifier.pressable(onClick) else Modifier)
+            .padding(horizontal = 12.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(icon, null, tint = fg, modifier = Modifier.size(16.dp))
+        Spacer(Modifier.width(4.dp))
+        Text(label, color = fg, fontSize = 13.sp, fontWeight = FontWeight.Medium)
     }
 }
 

@@ -163,6 +163,15 @@ class ViewerController(
     var lastCut by mutableStateOf<String?>(null)
     var hasUndo by mutableStateOf(false)
         private set
+    var hasRedo by mutableStateOf(false)
+        private set
+    // outline history while drawing: each entry is the list of points at that step
+    private val outlineUndo = ArrayList<List<FloatArray>>()
+    private val outlineRedo = ArrayList<List<FloatArray>>()
+    var canUndoPoint by mutableStateOf(false)
+        private set
+    var canRedoPoint by mutableStateOf(false)
+        private set
     private var cutCount = 0
 
     // saved views
@@ -635,6 +644,7 @@ class ViewerController(
         if (measureActive) toggleMeasure()
         cutActive = true
         cutPoints.clear()
+        clearOutlineHistory()
         askConnect = false
         createPartOpen = false
         lastCut = null
@@ -647,15 +657,50 @@ class ViewerController(
     fun cancelCut() {
         cutActive = false
         cutPoints.clear()
+        clearOutlineHistory()
         askConnect = false
         createPartOpen = false
         cutHint = null
         view?.requestRender()
     }
 
+    private fun syncHistory() {
+        canUndoPoint = outlineUndo.isNotEmpty()
+        canRedoPoint = outlineRedo.isNotEmpty()
+    }
+
+    /** Remembers the outline before a change so it can be undone. */
+    private fun pushOutlineHistory() {
+        outlineUndo.add(cutPoints.map { it.copyOf() })
+        if (outlineUndo.size > 200) outlineUndo.removeAt(0)
+        outlineRedo.clear()
+        syncHistory()
+    }
+
+    private fun clearOutlineHistory() {
+        outlineUndo.clear()
+        outlineRedo.clear()
+        syncHistory()
+    }
+
     fun undoCutPoint() {
-        if (cutPoints.isNotEmpty()) cutPoints.removeAt(cutPoints.size - 1)
+        if (outlineUndo.isEmpty()) return
+        outlineRedo.add(cutPoints.map { it.copyOf() })
+        val prev = outlineUndo.removeAt(outlineUndo.size - 1)
+        cutPoints.clear()
+        cutPoints.addAll(prev)
         askConnect = false
+        syncHistory()
+    }
+
+    fun redoCutPoint() {
+        if (outlineRedo.isEmpty()) return
+        outlineUndo.add(cutPoints.map { it.copyOf() })
+        val next = outlineRedo.removeAt(outlineRedo.size - 1)
+        cutPoints.clear()
+        cutPoints.addAll(next)
+        askConnect = false
+        syncHistory()
     }
 
     /** Screen positions of the cut points for the overlay (NaN when behind the camera). */
@@ -694,6 +739,7 @@ class ViewerController(
             if (hit == null) {
                 cutHint = "That tap missed the model — tap directly on its surface."
             } else {
+                pushOutlineHistory()
                 cutPoints.add(hit)
                 cutHint = when {
                     cutPoints.size < 3 -> "Keep tapping around the area (${cutPoints.size} point${if (cutPoints.size > 1) "s" else ""})."
@@ -733,6 +779,7 @@ class ViewerController(
         strokePts.clear()
         if (shape.size < 6) { cutHint = "Draw a larger shape around the area."; return }
         val pts3 = safe { NativeBridge.nativeUnproject(handle, shape) } ?: return
+        pushOutlineHistory()
         cutPoints.clear()
         for (i in 0 until pts3.size / 3) cutPoints.add(floatArrayOf(pts3[i * 3], pts3[i * 3 + 1], pts3[i * 3 + 2]))
         if (cutShape == CutGeometry.FREEHAND) {
@@ -793,6 +840,8 @@ class ViewerController(
             cutCount++
             cutActive = false
             cutPoints.clear()
+            clearOutlineHistory()
+            hasRedo = false
             cutHint = null
             hasUndo = true
             refreshStats()
@@ -811,8 +860,23 @@ class ViewerController(
             val ok = withContext(Dispatchers.Default) { safe { NativeBridge.nativeUndoCut(handle) } } ?: false
             if (ok) {
                 hasUndo = false
-                lastCut = null
+                hasRedo = true
+                lastCut = "Cut undone"
                 selectPart(-1)
+                delay(100)
+                refreshStats()
+            }
+            view?.requestRender()
+        }
+    }
+
+    fun redoLastCut() {
+        scope.launch {
+            val ok = withContext(Dispatchers.Default) { safe { NativeBridge.nativeRedoCut(handle) } } ?: false
+            if (ok) {
+                hasRedo = false
+                hasUndo = true
+                lastCut = "Cut redone"
                 delay(100)
                 refreshStats()
             }

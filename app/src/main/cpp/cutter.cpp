@@ -848,6 +848,7 @@ Renderer::CutResult Renderer::cut(const CutRequest& req, Sink* sink) {
         }
     }
     if (req.keepUndo) undo_ = cpu_;
+    redo_.clear();
     cpu_.swap(result);
     rebuildGpu_ = true;
     recomputeParts(sink);
@@ -862,8 +863,20 @@ Renderer::CutResult Renderer::cut(const CutRequest& req, Sink* sink) {
 bool Renderer::undoCut(Sink* sink) {
     std::lock_guard<std::mutex> dl(dataMu_);
     if (undo_.empty()) return false;
+    redo_ = cpu_;
     cpu_.swap(undo_);
     undo_.clear();
+    rebuildGpu_ = true;
+    recomputeParts(sink);
+    return true;
+}
+
+bool Renderer::redoCut(Sink* sink) {
+    std::lock_guard<std::mutex> dl(dataMu_);
+    if (redo_.empty()) return false;
+    undo_ = cpu_;
+    cpu_.swap(redo_);
+    redo_.clear();
     rebuildGpu_ = true;
     recomputeParts(sink);
     return true;

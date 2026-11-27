@@ -237,6 +237,11 @@ JNIEXPORT jstring JNICALL FN(nativeCut)(JNIEnv* env, jobject, jlong h, jfloatArr
     return env->NewStringUTF(safeUtf8(out).c_str());
 }
 
+JNIEXPORT jboolean JNICALL FN(nativeRedoCut)(JNIEnv*, jobject, jlong h) {
+    auto s = E(h)->sink();
+    return E(h)->renderer.redoCut(s.get());
+}
+
 JNIEXPORT jboolean JNICALL FN(nativeUndoCut)(JNIEnv*, jobject, jlong h) {
     auto s = E(h)->sink();
     return E(h)->renderer.undoCut(s.get());

@@ -41,6 +41,7 @@ object NativeBridge {
     @JvmStatic external fun nativeSnap(h: Long, x: Float, y: Float, px: Float, corners: Boolean, edges: Boolean): FloatArray?
     @JvmStatic external fun nativeUnproject(h: Long, xy: FloatArray): FloatArray
     @JvmStatic external fun nativeUndoCut(h: Long): Boolean
+    @JvmStatic external fun nativeRedoCut(h: Long): Boolean
     @JvmStatic external fun nativeRenamePart(h: Long, part: Int, name: String)
     @JvmStatic external fun nativeExportProgress(h: Long): Float
     @JvmStatic external fun nativeExportCancel(h: Long)
