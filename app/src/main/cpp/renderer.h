@@ -80,7 +80,6 @@ public:
     /** Saves the geometry held in memory (including edits). */
     std::string exportMemory(const ExportOptions& opt, Sink* sink);
     struct CutCam;
-    M4 projection(const Frame& f, int w, int h, double nearP, double far) const;
     bool cutCamera(CutCam& cc);
     void deletePart(int part, Sink* sink);
     /** 0 / 1 / 2: the axis the model is most symmetric across (through its centre). */
@@ -196,6 +195,7 @@ private:
     Bounds rotatedBounds(const Bounds& b) const;
     void buildPrograms();
     Frame frameState();  // call with mu_ held
+    M4 projection(const Frame& f, int w, int h, double nearP, double far) const;
     void renderScene(const Frame& f, int w, int h, bool background, bool allowGrid);
     void renderPick(const Frame& f, int x, int y);
     bool partHidden(const Frame& f, int part) const {
