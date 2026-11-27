@@ -55,6 +55,8 @@ public:
         std::vector<float> points;  // lasso corners in model space (x, y, z) * n
         int mode = 0;               // 0 cut through, 1 surface only, 2 one wall (outer + inner skin)
         std::string name;
+        int mirrorAxis = -1;        // 0/1/2: cut the mirror image across the model's centre on that axis
+        bool keepUndo = true;       // false for the second half of a mirrored cut (undo covers both)
     };
     struct CutResult {
         int part = -1;
@@ -67,6 +69,10 @@ public:
     bool hasUndo() { std::lock_guard<std::mutex> l(dataMu_); return !undo_.empty(); }
     /** Ray from a screen point; returns true and the model-space hit point. */
     bool raycast(float sx, float sy, float out[3]);
+    /** Surface point under a screen position, snapped to a nearby corner or edge if within snapPx. */
+    bool snapPoint(float sx, float sy, float snapPx, bool corners, bool edges, float out[3]);
+    /** Screen points to model space on the plane through the model's centre facing the camera. */
+    void unproject(const float* xy, int n, float* out);
     /** Projects model-space points to screen pixels (NaN when behind the camera). */
     void project(const float* in, int n, float* out);
     /** Saves the geometry held in memory (including edits). */

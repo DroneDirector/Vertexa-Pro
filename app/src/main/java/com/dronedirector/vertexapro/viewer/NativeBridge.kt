@@ -37,7 +37,9 @@ object NativeBridge {
     @JvmStatic external fun nativeSetCpuBudget(h: Long, bytes: Long)
     @JvmStatic external fun nativeRaycast(h: Long, x: Float, y: Float): FloatArray?
     @JvmStatic external fun nativeProject(h: Long, pts: FloatArray): FloatArray
-    @JvmStatic external fun nativeCut(h: Long, pts: FloatArray, mode: Int, name: String): String
+    @JvmStatic external fun nativeCut(h: Long, pts: FloatArray, mode: Int, name: String, mirrorAxis: Int, keepUndo: Boolean): String
+    @JvmStatic external fun nativeSnap(h: Long, x: Float, y: Float, px: Float, corners: Boolean, edges: Boolean): FloatArray?
+    @JvmStatic external fun nativeUnproject(h: Long, xy: FloatArray): FloatArray
     @JvmStatic external fun nativeUndoCut(h: Long): Boolean
     @JvmStatic external fun nativeRenamePart(h: Long, part: Int, name: String)
     @JvmStatic external fun nativeExportProgress(h: Long): Float

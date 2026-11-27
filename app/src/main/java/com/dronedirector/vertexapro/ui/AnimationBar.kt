@@ -45,7 +45,7 @@ fun AnimationBar(c: ViewerController, p: Palette) {
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(
-                Modifier.size(42.dp).clip(CircleShape).background(p.accentBrush).pressable { c.setPlaying(!c.playing) },
+                Modifier.size(42.dp).clip(CircleShape).background(p.accentBrush).pressable { c.playAnimation(!c.playing) },
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(if (c.playing) Icons.Outlined.Pause else Icons.Outlined.PlayArrow, if (c.playing) "Pause" else "Play",
@@ -54,7 +54,7 @@ fun AnimationBar(c: ViewerController, p: Palette) {
             Spacer(Modifier.width(8.dp))
             Slider(
                 value = if (dur > 0) (t / dur).toFloat().coerceIn(0f, 1f) else 0f,
-                onValueChange = { f -> if (c.playing) c.setPlaying(false); c.seek(f * dur) },
+                onValueChange = { f -> if (c.playing) c.playAnimation(false); c.seek(f * dur) },
                 modifier = Modifier.weight(1f),
                 colors = SliderDefaults.colors(thumbColor = p.accent, activeTrackColor = p.accent2, inactiveTrackColor = p.border),
             )

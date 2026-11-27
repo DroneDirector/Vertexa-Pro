@@ -278,6 +278,36 @@ void Renderer::project(const float* in, int n, float* out) {
 }
 
 bool Renderer::raycast(float sx, float sy, float outP[3]) {
+    return snapPoint(sx, sy, 0.f, false, false, outP);
+}
+
+void Renderer::unproject(const float* xy, int n, float* out) {
+    CutCam cc;
+    if (!cutCamera(cc)) {
+        for (int i = 0; i < n * 3; i++) out[i] = 0;
+        return;
+    }
+    Bounds b;
+    {
+        std::lock_guard<std::mutex> l(mu_);
+        b = bounds_;
+    }
+    V3 center = b.valid() ? V3((b.mn[0] + b.mx[0]) / 2, (b.mn[1] + b.mx[1]) / 2, (b.mn[2] + b.mx[2]) / 2) : V3();
+    double planeD = (center - cc.eye).dot(cc.fwd);
+    for (int i = 0; i < n; i++) {
+        double ndcX = 2.0 * xy[i * 2] / cc.W - 1.0, ndcY = 1.0 - 2.0 * xy[i * 2 + 1] / cc.H;
+        double dv[3] = {ndcX * cc.tanHalf * cc.aspect, ndcY * cc.tanHalf, -1.0};
+        V3 d(cc.R[0] * dv[0] + cc.R[3] * dv[1] + cc.R[6] * dv[2], cc.R[1] * dv[0] + cc.R[4] * dv[1] + cc.R[7] * dv[2],
+             cc.R[2] * dv[0] + cc.R[5] * dv[1] + cc.R[8] * dv[2]);
+        double t = planeD / std::max(1e-9, d.dot(cc.fwd));
+        V3 p = cc.eye + d * t;
+        out[i * 3] = (float)p.x;
+        out[i * 3 + 1] = (float)p.y;
+        out[i * 3 + 2] = (float)p.z;
+    }
+}
+
+bool Renderer::snapPoint(float sx, float sy, float snapPx, bool corners, bool edges, float outP[3]) {
     CutCam cc;
     if (!cutCamera(cc)) return false;
     double ndcX = 2.0 * sx / cc.W - 1.0, ndcY = 1.0 - 2.0 * sy / cc.H;
@@ -292,6 +322,7 @@ bool Renderer::raycast(float sx, float sy, float outP[3]) {
     }
     std::lock_guard<std::mutex> dl(dataMu_);
     double best = 1e300;
+    V3 hitTri[3];
     const V3 o = cc.eye;
     for (auto& cp : cpu_) {
         const Chunk& c = *cp;
@@ -314,7 +345,12 @@ bool Renderer::raycast(float sx, float sy, float outP[3]) {
             double v = d.dot(q) * inv;
             if (v < 0 || u + v > 1) continue;
             double tt = e2.dot(q) * inv;
-            if (tt > 0 && tt < best) best = tt;
+            if (tt > 0 && tt < best) {
+                best = tt;
+                hitTri[0] = V3(a[0], a[1], a[2]);
+                hitTri[1] = V3(b[0], b[1], b[2]);
+                hitTri[2] = V3(e[0], e[1], e[2]);
+            }
         }
     }
     if (best >= 1e299) return false;
@@ -322,6 +358,49 @@ bool Renderer::raycast(float sx, float sy, float outP[3]) {
     outP[0] = (float)hit.x;
     outP[1] = (float)hit.y;
     outP[2] = (float)hit.z;
+    if (snapPx <= 0 || (!corners && !edges)) return true;
+
+    double hitDepth = (hit - o).dot(cc.fwd);
+    double tol = cc.radius * 0.03;
+    double bestPx = snapPx;
+    V3 snapped = hit;
+    bool found = false;
+    auto screenDist = [&](const V3& p, double& px) {
+        float f[3] = {(float)p.x, (float)p.y, (float)p.z};
+        double qx, qy;
+        if (!projectCC(cc, f, qx, qy)) return false;
+        px = std::hypot(qx - sx, qy - sy);
+        return true;
+    };
+    if (corners) {
+        // nearest mesh corner on the same surface (close in depth to the hit)
+        for (auto& cp : cpu_) {
+            const Chunk& c = *cp;
+            if (c.points) continue;
+            if (c.part >= 0 && c.part < (int)hidden.size() && hidden[c.part]) continue;
+            for (auto& v : c.verts) {
+                V3 p(v.p[0], v.p[1], v.p[2]);
+                if (std::fabs((p - o).dot(cc.fwd) - hitDepth) > tol) continue;
+                double px;
+                if (screenDist(p, px) && px < bestPx) { bestPx = px; snapped = p; found = true; }
+            }
+        }
+    }
+    if (!found && edges) {
+        // nearest point on the edges of the triangle that was hit
+        for (int k = 0; k < 3; k++) {
+            V3 a = hitTri[k], b = hitTri[(k + 1) % 3];
+            V3 ab = b - a;
+            double L2 = ab.dot(ab);
+            double t = L2 > 0 ? std::clamp((hit - a).dot(ab) / L2, 0.0, 1.0) : 0.0;
+            V3 p = a + ab * t;
+            double px;
+            if (screenDist(p, px) && px < bestPx) { bestPx = px; snapped = p; found = true; }
+        }
+    }
+    outP[0] = (float)snapped.x;
+    outP[1] = (float)snapped.y;
+    outP[2] = (float)snapped.z;
     return true;
 }
 
@@ -347,12 +426,37 @@ Renderer::CutResult Renderer::cut(const CutRequest& req, Sink* sink) {
     if (n < 3) { res.error = "Place at least 3 points."; return res; }
     CutCam cc;
     if (!cutCamera(cc)) { res.error = "No model loaded."; return res; }
+    CutRequest mreq;
+    const CutRequest* rq = &req;
+    if (req.mirrorAxis >= 0 && req.mirrorAxis < 3) {
+        // The mirrored cut is the same cut seen through a mirror: reflect the camera and the outline.
+        Bounds b;
+        {
+            std::lock_guard<std::mutex> l(mu_);
+            b = bounds_;
+        }
+        if (!b.valid()) { res.error = "No model loaded."; return res; }
+        int ax = req.mirrorAxis;
+        double c = (b.mn[ax] + b.mx[ax]) / 2;
+        M4 m = M4::identity();
+        m.m[ax * 5] = -1;
+        m.m[12 + ax] = 2 * c;
+        cc.mvp = cc.mvp * m;
+        double* e = ax == 0 ? &cc.eye.x : ax == 1 ? &cc.eye.y : &cc.eye.z;
+        *e = 2 * c - *e;
+        double* fw = ax == 0 ? &cc.fwd.x : ax == 1 ? &cc.fwd.y : &cc.fwd.z;
+        *fw = -*fw;
+        mreq = req;
+        for (size_t i = 0; i < n; i++) mreq.points[i * 3 + ax] = (float)(2 * c - mreq.points[i * 3 + ax]);
+        rq = &mreq;
+    }
+    const CutRequest& R = *rq;
 
     // lasso on screen + cutting planes through the eye
     std::vector<double> lasso(n * 2);
     for (size_t i = 0; i < n; i++) {
         double sx, sy;
-        if (!projectCC(cc, &req.points[i * 3], sx, sy)) {
+        if (!projectCC(cc, &R.points[i * 3], sx, sy)) {
             res.error = "Some points are behind the camera. Turn the view so every point is visible, then try again.";
             return res;
         }
@@ -365,8 +469,8 @@ Renderer::CutResult Renderer::cut(const CutRequest& req, Sink* sink) {
     std::vector<double> cum(n + 1, 0.0);
     for (size_t i = 0; i < n; i++) {
         size_t j = (i + 1) % n;
-        V3 a(req.points[i * 3] - cc.eye.x, req.points[i * 3 + 1] - cc.eye.y, req.points[i * 3 + 2] - cc.eye.z);
-        V3 b(req.points[j * 3] - cc.eye.x, req.points[j * 3 + 1] - cc.eye.y, req.points[j * 3 + 2] - cc.eye.z);
+        V3 a(R.points[i * 3] - cc.eye.x, R.points[i * 3 + 1] - cc.eye.y, R.points[i * 3 + 2] - cc.eye.z);
+        V3 b(R.points[j * 3] - cc.eye.x, R.points[j * 3 + 1] - cc.eye.y, R.points[j * 3 + 2] - cc.eye.z);
         V3 nn = a.cross(b).norm();
         planes[i].n = nn;
         planes[i].d = -nn.dot(cc.eye);
@@ -743,7 +847,7 @@ Renderer::CutResult Renderer::cut(const CutRequest& req, Sink* sink) {
                 result.push_back(std::shared_ptr<Chunk>(c.release()));
         }
     }
-    undo_ = cpu_;
+    if (req.keepUndo) undo_ = cpu_;
     cpu_.swap(result);
     rebuildGpu_ = true;
     recomputeParts(sink);

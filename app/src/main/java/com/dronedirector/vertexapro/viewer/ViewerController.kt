@@ -143,6 +143,18 @@ class ViewerController(
         private set
     var cutMode by mutableIntStateOf(0)
     val cutPoints = androidx.compose.runtime.mutableStateListOf<FloatArray>()
+    /** Points, Curve, Freehand, Rectangle or Ellipse (see CutGeometry). */
+    var cutShape by mutableIntStateOf(CutGeometry.POINTS)
+    var snapOn by mutableStateOf(true)
+    var straightOn by mutableStateOf(false)
+    var mirrorCut by mutableStateOf(false)
+    var mirrorAxis by mutableIntStateOf(0)
+    /** Live stroke while drawing a freehand / rectangle / ellipse shape (screen pixels). */
+    var drawPath by mutableStateOf(FloatArray(0))
+        private set
+    private var drawAnchorX = 0f
+    private var drawAnchorY = 0f
+    private val strokePts = ArrayList<Float>()
     var askConnect by mutableStateOf(false)
     var createPartOpen by mutableStateOf(false)
     var cutBusy by mutableStateOf(false)
@@ -298,7 +310,7 @@ class ViewerController(
             if (clips.isNotEmpty()) break
             view?.requestRender()
         }
-        if (clips.isNotEmpty()) setPlaying(true)
+        if (clips.isNotEmpty()) playAnimation(true)
         canEdit = safe { NativeBridge.nativeCanEdit(handle) } ?: false
         viewStore.last(source.uri.toString())?.let { cam ->
             safe { NativeBridge.nativeSetCamera(handle, cam, true) }
@@ -537,7 +549,7 @@ class ViewerController(
     }
 
     // ---------------------------------------------------------------- animation
-    fun setPlaying(on: Boolean) {
+    fun playAnimation(on: Boolean) {
         playing = on
         safe { NativeBridge.nativeAnimPlay(handle, clip, on) }
         view?.requestRender()
@@ -627,7 +639,7 @@ class ViewerController(
         createPartOpen = false
         lastCut = null
         selectPart(-1)
-        cutHint = "Tap points on the model around the area. Drag to rotate between taps."
+        cutHint = com.dronedirector.vertexapro.ui.shapeHint(cutShape)
         safe { NativeBridge.nativeSetAutoRotate(handle, false) }
         autoRotate = false
     }
@@ -664,8 +676,21 @@ class ViewerController(
                 return
             }
         }
+        var tx = x
+        var ty = y
+        if (straightOn && cutPoints.isNotEmpty()) {
+            val pr = projectCutPoints()
+            val li = cutPoints.size - 1
+            if (pr.size >= li * 2 + 2 && !pr[li * 2].isNaN()) {
+                val (sx, sy) = CutGeometry.straighten(pr[li * 2], pr[li * 2 + 1], x, y)
+                tx = sx; ty = sy
+            }
+        }
+        val snapPx = if (snapOn) 16 * density else 0f
         scope.launch {
-            val hit = withContext(Dispatchers.Default) { safe { NativeBridge.nativeRaycast(handle, x, y) } }
+            val hit = withContext(Dispatchers.Default) {
+                safe { NativeBridge.nativeSnap(handle, tx, ty, snapPx, snapOn, snapOn) }
+            }
             if (hit == null) {
                 cutHint = "That tap missed the model — tap directly on its surface."
             } else {
@@ -679,6 +704,61 @@ class ViewerController(
         }
     }
 
+    /** True while one-finger drags draw a shape instead of rotating the view. */
+    fun isDrawMode() = cutActive && cutShape >= CutGeometry.FREEHAND && !askConnect && !createPartOpen && !cutBusy
+
+    fun drawStart(x: Float, y: Float) {
+        drawAnchorX = x; drawAnchorY = y
+        strokePts.clear()
+        strokePts += x; strokePts += y
+        drawPath = floatArrayOf(x, y)
+    }
+
+    fun drawMove(x: Float, y: Float) {
+        drawPath = when (cutShape) {
+            CutGeometry.RECTANGLE -> CutGeometry.rectangle(drawAnchorX, drawAnchorY, x, y)
+            CutGeometry.ELLIPSE -> CutGeometry.ellipse(drawAnchorX, drawAnchorY, x, y)
+            else -> { strokePts += x; strokePts += y; strokePts.toFloatArray() }
+        }
+    }
+
+    fun drawCancel() { drawPath = FloatArray(0); strokePts.clear() }
+
+    fun drawEnd() {
+        val shape = when (cutShape) {
+            CutGeometry.FREEHAND -> CutGeometry.simplify(drawPath, 4f)
+            else -> drawPath
+        }
+        drawPath = FloatArray(0)
+        strokePts.clear()
+        if (shape.size < 6) { cutHint = "Draw a larger shape around the area."; return }
+        val pts3 = safe { NativeBridge.nativeUnproject(handle, shape) } ?: return
+        cutPoints.clear()
+        for (i in 0 until pts3.size / 3) cutPoints.add(floatArrayOf(pts3[i * 3], pts3[i * 3 + 1], pts3[i * 3 + 2]))
+        if (cutShape == CutGeometry.FREEHAND) {
+            askConnect = true  // "connect your last point with the start?"
+        } else {
+            createPartOpen = true
+        }
+    }
+
+    /** The outline that will actually be cut: curves are smoothed into many small segments. */
+    private fun cutOutline(): FloatArray {
+        val flat = FloatArray(cutPoints.size * 3)
+        cutPoints.forEachIndexed { i, p -> System.arraycopy(p, 0, flat, i * 3, 3) }
+        if (cutShape != CutGeometry.CURVE || cutPoints.size < 3) return flat
+        val scr = projectCutPoints()
+        if (scr.any { it.isNaN() }) return flat
+        val smooth = CutGeometry.smoothClosed(scr, 4f * context.resources.displayMetrics.density)
+        return safe { NativeBridge.nativeUnproject(handle, smooth) } ?: flat
+    }
+
+    /** Screen outline for the overlay (smoothed when using the curve tool). */
+    fun outlineForOverlay(projected: FloatArray): FloatArray =
+        if (cutShape == CutGeometry.CURVE && projected.size >= 6 && projected.none { it.isNaN() })
+            CutGeometry.smoothClosed(projected, 4f * context.resources.displayMetrics.density)
+        else projected
+
     fun connectOutline() {
         askConnect = false
         if (cutPoints.size >= 3) createPartOpen = true
@@ -689,10 +769,17 @@ class ViewerController(
     fun createPart(name: String, mode: Int) {
         if (cutPoints.size < 3) return
         cutBusy = true
-        val flat = FloatArray(cutPoints.size * 3)
-        cutPoints.forEachIndexed { i, p -> System.arraycopy(p, 0, flat, i * 3, 3) }
+        val flat = cutOutline()
+        val mirror = if (mirrorCut) mirrorAxis else -1
         scope.launch {
-            val r = withContext(Dispatchers.Default) { safe { NativeBridge.nativeCut(handle, flat, mode, name) } } ?: "ERR|Cancelled"
+            val r = withContext(Dispatchers.Default) {
+                val first = safe { NativeBridge.nativeCut(handle, flat, mode, name, -1, true) } ?: "ERR|Cancelled"
+                if (mirror >= 0 && !first.startsWith("ERR|")) {
+                    val second = safe { NativeBridge.nativeCut(handle, flat, mode, "$name (mirror)", mirror, false) }
+                    if (second != null && second.startsWith("ERR|")) cutHint = "Mirror side: " + second.removePrefix("ERR|")
+                }
+                first
+            }
             cutBusy = false
             createPartOpen = false
             if (r.startsWith("ERR|")) {
@@ -711,7 +798,7 @@ class ViewerController(
             refreshStats()
             rebuildReport()
             selectPart(idx)
-            lastCut = "Created \"$name\" · ${com.dronedirector.vertexapro.data.formatCount(tris)} triangles" +
+            lastCut = "Created \"$name\"${if (mirror >= 0) " + mirror" else ""} · ${com.dronedirector.vertexapro.data.formatCount(tris)} triangles" +
                 if (caps > 0) " · sealed with ${com.dronedirector.vertexapro.data.formatCount(caps)}" else ""
             view?.requestRender()
             delay(250)

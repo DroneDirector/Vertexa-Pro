@@ -1,10 +1,7 @@
 // Animation data for animated FBX / glTF / DAE models: node hierarchy, rigid node animation
 // and skeletal skinning. Evaluated on the GL thread every frame while playing.
 #pragma once
-#include <assimp/matrix3x3.h>
-#include <assimp/matrix4x4.h>
-#include <assimp/quaternion.h>
-#include <assimp/vector3.h>
+#include <assimp/scene.h>  // brings in the math types together with their operators
 
 #include <algorithm>
 #include <array>

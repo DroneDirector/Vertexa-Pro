@@ -193,8 +193,30 @@ JNIEXPORT jfloatArray JNICALL FN(nativeProject)(JNIEnv* env, jobject, jlong h, j
     return a;
 }
 
-JNIEXPORT jstring JNICALL FN(nativeCut)(JNIEnv* env, jobject, jlong h, jfloatArray pts, jint mode, jstring name) {
+JNIEXPORT jfloatArray JNICALL FN(nativeSnap)(JNIEnv* env, jobject, jlong h, jfloat x, jfloat y, jfloat px,
+                                             jboolean corners, jboolean edges) {
+    float p[3];
+    if (!E(h)->renderer.snapPoint(x, y, px, corners, edges, p)) return nullptr;
+    jfloatArray a = env->NewFloatArray(3);
+    env->SetFloatArrayRegion(a, 0, 3, p);
+    return a;
+}
+
+JNIEXPORT jfloatArray JNICALL FN(nativeUnproject)(JNIEnv* env, jobject, jlong h, jfloatArray xy) {
+    jsize n = env->GetArrayLength(xy) / 2;
+    std::vector<float> in(n * 2), out(n * 3);
+    if (n) env->GetFloatArrayRegion(xy, 0, n * 2, in.data());
+    E(h)->renderer.unproject(in.data(), n, out.data());
+    jfloatArray a = env->NewFloatArray(n * 3);
+    if (n) env->SetFloatArrayRegion(a, 0, n * 3, out.data());
+    return a;
+}
+
+JNIEXPORT jstring JNICALL FN(nativeCut)(JNIEnv* env, jobject, jlong h, jfloatArray pts, jint mode, jstring name,
+                                        jint mirrorAxis, jboolean keepUndo) {
     Renderer::CutRequest req;
+    req.mirrorAxis = mirrorAxis;
+    req.keepUndo = keepUndo;
     jsize n = env->GetArrayLength(pts);
     req.points.resize(n);
     if (n) env->GetFloatArrayRegion(pts, 0, n, req.points.data());

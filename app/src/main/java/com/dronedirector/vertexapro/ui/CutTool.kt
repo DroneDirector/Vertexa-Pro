@@ -20,6 +20,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -73,23 +75,65 @@ fun CutOverlay(c: ViewerController, p: Palette) {
     val t = rememberInfiniteTransition(label = "cut")
     val pulse by t.animateFloat(0.6f, 1.25f, infiniteRepeatable(tween(900, easing = LinearEasing), RepeatMode.Reverse), label = "pulse")
     val dash by t.animateFloat(0f, 40f, infiniteRepeatable(tween(1200, easing = LinearEasing)), label = "dash")
+    val live = c.drawPath
+    val outline = c.outlineForOverlay(pts)
     Canvas(Modifier.fillMaxSize()) {
+        val glow0 = Color(0xFFFF9E26)
+        if (live.size >= 4) {
+            for (i in 0 until live.size / 2 - 1) {
+                drawLine(Color.Black.copy(alpha = 0.35f), Offset(live[i * 2], live[i * 2 + 1]), Offset(live[i * 2 + 2], live[i * 2 + 3]),
+                    strokeWidth = 7.dp.toPx(), cap = StrokeCap.Round)
+                drawLine(glow0, Offset(live[i * 2], live[i * 2 + 1]), Offset(live[i * 2 + 2], live[i * 2 + 3]),
+                    strokeWidth = 3.dp.toPx(), cap = StrokeCap.Round)
+            }
+            if (c.cutShape != com.dronedirector.vertexapro.viewer.CutGeometry.FREEHAND) {
+                val m = live.size / 2
+                drawLine(glow0, Offset(live[(m - 1) * 2], live[(m - 1) * 2 + 1]), Offset(live[0], live[1]),
+                    strokeWidth = 3.dp.toPx(), cap = StrokeCap.Round)
+            }
+        }
+        // smoothed curve preview
+        if (outline !== pts && outline.size >= 6) {
+            val m = outline.size / 2
+            for (i in 0 until m) {
+                val a = Offset(outline[i * 2], outline[i * 2 + 1])
+                val b = Offset(outline[((i + 1) % m) * 2], outline[((i + 1) % m) * 2 + 1])
+                drawLine(p.accent.copy(alpha = if (i == m - 1) 0.5f else 0.95f), a, b, strokeWidth = 3.dp.toPx(), cap = StrokeCap.Round)
+            }
+        }
         val n = pts.size / 2
         if (n == 0) return@Canvas
         fun pt(i: Int) = Offset(pts[i * 2], pts[i * 2 + 1])
         fun ok(i: Int) = !pts[i * 2].isNaN()
         val glow = Color(0xFFFF9E26)
         val brush = Brush.linearGradient(listOf(p.accent, glow))
+        val curve = outline !== pts
         for (i in 0 until n - 1) {
             if (!ok(i) || !ok(i + 1)) continue
-            drawLine(Color.Black.copy(alpha = 0.35f), pt(i), pt(i + 1), strokeWidth = 7.dp.toPx(), cap = StrokeCap.Round)
-            drawLine(brush, pt(i), pt(i + 1), strokeWidth = 3.dp.toPx(), cap = StrokeCap.Round)
+            if (curve) {
+                drawLine(Color.White.copy(alpha = 0.35f), pt(i), pt(i + 1), strokeWidth = 1.dp.toPx(),
+                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 8f)))
+            } else {
+                drawLine(Color.Black.copy(alpha = 0.35f), pt(i), pt(i + 1), strokeWidth = 7.dp.toPx(), cap = StrokeCap.Round)
+                drawLine(brush, pt(i), pt(i + 1), strokeWidth = 3.dp.toPx(), cap = StrokeCap.Round)
+            }
         }
-        if (n >= 3 && ok(n - 1) && ok(0)) {
+        if (n >= 3 && ok(n - 1) && ok(0) && !curve) {
             drawLine(
                 glow.copy(alpha = 0.8f), pt(n - 1), pt(0), strokeWidth = 2.dp.toPx(),
                 pathEffect = PathEffect.dashPathEffect(floatArrayOf(14f, 12f), dash),
             )
+        }
+        val dense = c.cutShape >= com.dronedirector.vertexapro.viewer.CutGeometry.FREEHAND
+        if (dense) {
+            for (i in 0 until n) {
+                val j = (i + 1) % n
+                if (!ok(i) || !ok(j) || (j == 0 && c.cutShape == com.dronedirector.vertexapro.viewer.CutGeometry.FREEHAND && c.askConnect)) continue
+                drawLine(Color.Black.copy(alpha = 0.35f), pt(i), pt(j), strokeWidth = 7.dp.toPx(), cap = StrokeCap.Round)
+                drawLine(brush, pt(i), pt(j), strokeWidth = 3.dp.toPx(), cap = StrokeCap.Round)
+            }
+            if (ok(0)) drawCircle(glow, 6.dp.toPx(), pt(0))
+            return@Canvas
         }
         for (i in 0 until n) {
             if (!ok(i)) continue
@@ -122,13 +166,39 @@ fun CutToolbar(c: ViewerController, p: Palette) {
             }
         }
         VSpace(10.dp)
+        Row(
+            Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically,
+        ) {
+            listOf("Points", "Curve", "Freehand", "Rectangle", "Ellipse").forEachIndexed { i, label ->
+                PillChip(label, c.cutShape == i, p) {
+                    if (c.cutShape != i) { c.cutShape = i; c.cutPoints.clear(); c.cutHint = shapeHint(i) }
+                }
+            }
+        }
+        if (c.cutShape <= 1) {
+            VSpace(8.dp)
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                PillChip("Snap to corners & edges", c.snapOn, p) { c.snapOn = !c.snapOn }
+                PillChip("Straight 45°", c.straightOn, p) { c.straightOn = !c.straightOn }
+            }
+        }
+        VSpace(8.dp)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            PillChip("Undo point", false, p, trailing = null) { c.undoCutPoint() }
-            if (c.cutPoints.size >= 3) PillChip("Close outline", false, p) { c.askConnect = true }
+            if (c.cutShape <= 1) PillChip("Undo point", false, p, trailing = null) { c.undoCutPoint() }
+            if (c.cutShape <= 1 && c.cutPoints.size >= 3) PillChip("Close outline", false, p) { c.askConnect = true }
             Spacer(Modifier.weight(1f))
             PillChip("Cancel", false, p) { c.cancelCut() }
         }
     }
+}
+
+fun shapeHint(shape: Int) = when (shape) {
+    0 -> "Tap points on the model around the area. Drag to rotate between taps."
+    1 -> "Tap points around the area — they're joined by a smooth curve."
+    2 -> "Draw around the area with one finger. Two fingers move the view."
+    3 -> "Drag a rectangle over the area. Two fingers move the view."
+    else -> "Drag an oval over the area. Two fingers move the view."
 }
 
 /** "Connect your last point with the start point?" */
@@ -190,6 +260,28 @@ fun CreatePartCard(c: ViewerController, p: Palette) {
                         Text(label, color = if (sel) Color.White else p.text, fontWeight = FontWeight.Bold, fontSize = 15.sp)
                         Text(desc, color = if (sel) Color.White.copy(alpha = 0.88f) else p.muted, fontSize = 12.sp)
                     }
+                }
+            }
+            VSpace(12.dp)
+            Row(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(p.glass).pressable { c.mirrorCut = !c.mirrorCut }
+                    .padding(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("Mirror cut", color = p.text, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                    Text("Also cut the matching part on the other side (left ↔ right)", color = p.muted, fontSize = 12.sp)
+                }
+                androidx.compose.material3.Switch(
+                    checked = c.mirrorCut, onCheckedChange = { c.mirrorCut = it },
+                    colors = androidx.compose.material3.SwitchDefaults.colors(checkedTrackColor = p.accent2, checkedThumbColor = Color.White),
+                )
+            }
+            if (c.mirrorCut) {
+                VSpace(8.dp)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Mirror across", color = p.muted, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    listOf("X", "Y", "Z").forEachIndexed { i, a -> PillChip(a, c.mirrorAxis == i, p) { c.mirrorAxis = i } }
                 }
             }
             VSpace(18.dp)
