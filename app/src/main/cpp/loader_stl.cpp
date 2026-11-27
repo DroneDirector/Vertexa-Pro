@@ -62,6 +62,10 @@ std::string loadStl(int fd, int64_t size, Sink& sink) {
         else if (strncmp((const char*)head, "solid", 5) != 0) binary = true;
     }
     StlEmitter em(sink, mat);
+    sink.log(0, binary ? "Binary STL, header says " + std::to_string(count) + " triangles" : "ASCII (text) STL");
+    if (binary && size > 0 && (int64_t)84 + (int64_t)count * 50 != size)
+        sink.log(1, "The triangle count in the header doesn't match the file size (" + std::to_string(size) +
+                        " bytes); reading until the end of the file.");
 
     if (binary) {
         r.read(head, 84);
@@ -114,6 +118,9 @@ std::string loadStl(int fd, int64_t size, Sink& sink) {
         }
     }
     em.b.flush();
+    sink.log(0, "Triangles read: " + std::to_string(sink.triangleCount.load()));
+    if (binary && (int64_t)sink.triangleCount.load() < (int64_t)count)
+        sink.log(1, "The file ended early: " + std::to_string(count - sink.triangleCount.load()) + " triangles are missing (file may be cut off).");
     if (sink.vertexCount.load() == 0) return "No triangles found in this STL file.";
     return "";
 }

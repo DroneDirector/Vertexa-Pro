@@ -18,9 +18,14 @@ namespace vx {
 
 class FdReader {
 public:
-    FdReader(int fd, int64_t size, Sink* sink) : fd_(fd), size_(size), sink_(sink) {
+    // textMode: detect and normalise UTF-16 text, byte-order marks and old Mac (CR-only) line endings.
+    FdReader(int fd, int64_t size, Sink* sink, bool textMode = false)
+        : fd_(fd), size_(size), sink_(sink), text_(textMode) {
         buf_.resize(kBuf);
     }
+    bool utf16() const { return stripNul_; }
+    bool crOnly() const { return crMode_; }
+    bool hadBom() const { return bom_; }
 
     // Returns pointer to the next line (without newline, NUL terminated) or nullptr at EOF.
     char* line(size_t* lenOut = nullptr) {
@@ -102,9 +107,41 @@ private:
             eof_ = true;
             return;
         }
-        end_ += (size_t)r;
         fileOffset_ += r;
+        if (text_) r = (ssize_t)normalise(buf_.data() + end_, (size_t)r);
+        end_ += (size_t)r;
         if (sink_ && size_ > 0) sink_->progress = (float)((double)offset() / (double)size_);
+    }
+
+    size_t normalise(char* d, size_t n) {
+        if (first_) {
+            first_ = false;
+            unsigned char* u = (unsigned char*)d;
+            size_t skip = 0;
+            if (n >= 2 && ((u[0] == 0xFF && u[1] == 0xFE) || (u[0] == 0xFE && u[1] == 0xFF))) {
+                stripNul_ = true; bom_ = true; skip = 2;
+            } else if (n >= 3 && u[0] == 0xEF && u[1] == 0xBB && u[2] == 0xBF) {
+                bom_ = true; skip = 3;
+            }
+            size_t nul = 0, lf = 0, cr = 0;
+            for (size_t i = 0; i < n; i++) {
+                if (d[i] == 0) nul++;
+                else if (d[i] == '\n') lf++;
+                else if (d[i] == '\r') cr++;
+            }
+            if (nul > n / 4) stripNul_ = true;
+            if (lf == 0 && cr > 0) crMode_ = true;
+            if (skip) { memmove(d, d + skip, n - skip); n -= skip; }
+        }
+        if (!stripNul_ && !crMode_) return n;
+        size_t o = 0;
+        for (size_t i = 0; i < n; i++) {
+            char c = d[i];
+            if (stripNul_ && c == 0) continue;
+            if (crMode_ && c == '\r') c = '\n';
+            d[o++] = c;
+        }
+        return o;
     }
 
     int fd_;
@@ -114,6 +151,7 @@ private:
     size_t pos_ = 0, end_ = 0;
     int64_t fileOffset_ = 0;
     bool eof_ = false;
+    bool text_ = false, first_ = true, stripNul_ = false, crMode_ = false, bom_ = false;
 };
 
 // ---- fast text number parsing -------------------------------------------------
@@ -131,7 +169,7 @@ inline double parseDouble(const char*& s) {
     double v = 0;
     bool digits = false;
     while (*p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); p++; digits = true; }
-    if (*p == '.') {
+    if (*p == '.' || (*p == ',' && p[1] >= '0' && p[1] <= '9')) {
         p++;
         double f = 0.1;
         while (*p >= '0' && *p <= '9') { v += (*p - '0') * f; f *= 0.1; p++; digits = true; }

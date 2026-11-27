@@ -10,6 +10,24 @@ namespace {
 
 Engine* E(jlong h) { return reinterpret_cast<Engine*>(h); }
 
+// JNI needs valid (modified) UTF-8; replace anything else with '?'.
+std::string safeUtf8(const std::string& in) {
+    std::string out;
+    out.reserve(in.size());
+    size_t i = 0;
+    while (i < in.size()) {
+        unsigned char c = (unsigned char)in[i];
+        int n = c < 0x80 ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : 0;
+        if (c == 0 || n == 0 || i + n > in.size()) { out += '?'; i++; continue; }
+        bool ok = true;
+        for (int k = 1; k < n; k++) if (((unsigned char)in[i + k] >> 6) != 2) ok = false;
+        if (!ok) { out += '?'; i++; continue; }
+        out.append(in, i, n);
+        i += n;
+    }
+    return out;
+}
+
 class JniResolver : public Resolver {
 public:
     JniResolver(JNIEnv* env, jobject obj) : env_(env), obj_(obj) {
@@ -54,7 +72,7 @@ JNIEXPORT jstring JNICALL FN(nativeLoad)(JNIEnv* env, jobject, jlong h, jint fd,
     env->ReleaseStringUTFChars(name, n);
     JniResolver res(env, resolver);
     std::string err = E(h)->load(fd, size, nm, res);
-    return env->NewStringUTF(err.c_str());
+    return env->NewStringUTF(safeUtf8(err).c_str());
 }
 
 JNIEXPORT void JNICALL FN(nativeCancel)(JNIEnv*, jobject, jlong h) { E(h)->cancel(); }
@@ -87,7 +105,21 @@ JNIEXPORT jobjectArray JNICALL FN(nativeMaterialTextures)(JNIEnv* env, jobject, 
     jclass sc = env->FindClass("java/lang/String");
     jobjectArray arr = env->NewObjectArray((jsize)mats.size(), sc, nullptr);
     for (size_t i = 0; i < mats.size(); i++) {
-        jstring js = env->NewStringUTF(mats[i].texture.c_str());
+        jstring js = env->NewStringUTF(safeUtf8(mats[i].texture).c_str());
+        env->SetObjectArrayElement(arr, (jsize)i, js);
+        env->DeleteLocalRef(js);
+    }
+    return arr;
+}
+
+JNIEXPORT jobjectArray JNICALL FN(nativeReport)(JNIEnv* env, jobject, jlong h) {
+    auto s = E(h)->sink();
+    std::vector<std::string> lines;
+    if (s) lines = s->logs();
+    jclass sc = env->FindClass("java/lang/String");
+    jobjectArray arr = env->NewObjectArray((jsize)lines.size(), sc, nullptr);
+    for (size_t i = 0; i < lines.size(); i++) {
+        jstring js = env->NewStringUTF(safeUtf8(lines[i]).c_str());
         env->SetObjectArrayElement(arr, (jsize)i, js);
         env->DeleteLocalRef(js);
     }
@@ -144,6 +176,7 @@ JNIEXPORT void JNICALL FN(nativeClearModel)(JNIEnv*, jobject, jlong h) {
     E(h)->resetSink();
     E(h)->renderer.clearModel();
 }
+JNIEXPORT void JNICALL FN(nativeReleaseGl)(JNIEnv*, jobject, jlong h) { E(h)->renderer.releaseGl(); }
 JNIEXPORT void JNICALL FN(nativeSetTexture)(JNIEnv*, jobject, jlong h, jint mat, jint tex) {
     E(h)->renderer.setTexture(mat, tex);
 }

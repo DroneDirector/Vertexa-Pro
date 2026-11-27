@@ -28,6 +28,7 @@ public:
     void surfaceChanged(int w, int h);
     bool draw(Sink* sink, double nowSec);  // returns true when another frame is needed
     void clearModel();
+    void releaseGl();  // deletes every GL object; call with the context current
     void setTexture(int material, int glTex);
 
     // any thread

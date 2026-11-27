@@ -134,6 +134,13 @@ std::string loadPly(int fd, int64_t size, Sink& sink, Resolver& res) {
         }
     }
     if (fmt < 0) return "Unknown PLY format.";
+    sink.log(0, std::string("PLY format: ") + (fmt == 0 ? "ASCII" : fmt == 1 ? "binary little-endian" : "binary big-endian"));
+    for (auto& e : els) {
+        std::string props;
+        for (auto& pr : e.props) props += (props.empty() ? "" : ", ") + pr.name;
+        sink.log(0, "Element \"" + e.name + "\" × " + std::to_string(e.count) + " (" + props + ")");
+    }
+    if (!textureFile.empty()) sink.log(0, "Texture named in header: " + textureFile);
 
     int64_t faceCount = 0;
     for (auto& e : els) if (e.name == "face") faceCount += e.count;
@@ -281,6 +288,8 @@ std::string loadPly(int fd, int64_t size, Sink& sink, Resolver& res) {
         if (!val.ok) break;
     }
     if (mesh) mesh->flush();
+    if (!val.ok) sink.log(1, "The file ended before all elements listed in the header were read (file may be cut off).");
+    if (faceCount == 0) sink.log(0, "No faces: shown as a point cloud.");
     if (sink.vertexCount.load() == 0 && !verts.empty()) {
         // vertices but no usable faces -> show as points
         Builder pb(sink, mat, true);

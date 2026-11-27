@@ -39,7 +39,9 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.dronedirector.vertexapro.data.Formats
 import com.dronedirector.vertexapro.data.ModelSource
 import com.dronedirector.vertexapro.data.Prefs
-import com.dronedirector.vertexapro.ui.FolderPicker
+import com.dronedirector.vertexapro.ui.BrowserScreen
+import com.dronedirector.vertexapro.data.BrowseItem
+import androidx.documentfile.provider.DocumentFile
 import com.dronedirector.vertexapro.ui.HomeScreen
 import com.dronedirector.vertexapro.ui.SettingsScreen
 import com.dronedirector.vertexapro.ui.SplashScreen
@@ -91,10 +93,9 @@ private sealed interface Screen {
     data object Splash : Screen
     data object Home : Screen
     data object Settings : Screen
-    data class Viewer(val source: ModelSource, val id: Long = System.nanoTime()) : Screen
+    data class Browser(val title: String, val tree: Uri?, val id: Long = System.nanoTime()) : Screen
+    data class Viewer(val source: ModelSource, val back: Screen = Home, val id: Long = System.nanoTime()) : Screen
 }
-
-private data class Choice(val label: String, val size: Long, val open: () -> Unit)
 
 @Composable
 private fun VertexaApp(activity: MainActivity, incoming: MutableStateFlow<Uri?>) {
@@ -107,7 +108,11 @@ private fun VertexaApp(activity: MainActivity, incoming: MutableStateFlow<Uri?>)
     var autoCheck by remember { mutableStateOf(prefs.autoCheckUpdates) }
     var updatePhase by remember { mutableStateOf<UpdatePhase>(UpdatePhase.Idle) }
     var availableRelease by remember { mutableStateOf<Release?>(null) }
-    var choices by remember { mutableStateOf<List<Choice>?>(null) }
+    var folders by remember { mutableStateOf(prefs.folders()) }
+    var browserItems by remember { mutableStateOf<List<BrowseItem>?>(null) }
+    var sortKey by remember { mutableStateOf(prefs.sortKey) }
+    var sortAsc by remember { mutableStateOf(prefs.sortAsc) }
+    var browserGrid by remember { mutableStateOf(prefs.browserGrid) }
     val pendingUri by incoming.collectAsState()
     val installStatus by UpdateManager.installStatus.collectAsState()
     val palette = paletteFor(theme)
@@ -119,7 +124,17 @@ private fun VertexaApp(activity: MainActivity, incoming: MutableStateFlow<Uri?>)
     fun open(src: ModelSource) {
         prefs.addRecent(src)
         recents = prefs.recents()
-        screen = Screen.Viewer(src)
+        val cur = screen
+        screen = Screen.Viewer(src, back = if (cur is Screen.Browser) cur else Screen.Home)
+    }
+
+    fun browseFolder(tree: Uri, name: String) {
+        browserItems = null
+        screen = Screen.Browser(name, tree)
+        scope.launch {
+            val found = withContext(Dispatchers.IO) { scanTree(ctx, tree) }
+            if ((screen as? Screen.Browser)?.tree == tree) browserItems = found
+        }
     }
 
     fun persist(uri: Uri) {
@@ -141,10 +156,12 @@ private fun VertexaApp(activity: MainActivity, incoming: MutableStateFlow<Uri?>)
                     val m = models[0]
                     open(ModelSource(m.first, m.second, m.third, extras = uris.filter { it != m.first }))
                 }
-                else -> choices = models.map { m ->
-                    Choice(m.second, m.third) {
-                        open(ModelSource(m.first, m.second, m.third, extras = uris.filter { it != m.first }))
+                else -> {
+                    browserItems = models.map { m ->
+                        BrowseItem(m.first, m.second, m.second, m.third, SiblingResolver.modified(ctx, m.first),
+                            extras = uris.filter { it != m.first })
                     }
+                    screen = Screen.Browser("Selected models", null)
                 }
             }
         }
@@ -153,21 +170,10 @@ private fun VertexaApp(activity: MainActivity, incoming: MutableStateFlow<Uri?>)
     val pickFolder = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { tree ->
         if (tree == null) return@rememberLauncherForActivityResult
         persist(tree)
-        scope.launch {
-            val found = withContext(Dispatchers.IO) { scanTree(ctx, tree) }
-            when {
-                found.isEmpty() -> toast("No supported 3D models in that folder.")
-                found.size == 1 -> {
-                    val f = found[0]
-                    open(ModelSource(f.uri, f.path.substringAfterLast('/'), f.size, tree = tree, relPath = f.path))
-                }
-                else -> choices = found.map { f ->
-                    Choice(f.path, f.size) {
-                        open(ModelSource(f.uri, f.path.substringAfterLast('/'), f.size, tree = tree, relPath = f.path))
-                    }
-                }
-            }
-        }
+        val name = DocumentFile.fromTreeUri(ctx, tree)?.name ?: "Folder"
+        prefs.addFolder(tree.toString(), name)
+        folders = prefs.folders()
+        browseFolder(tree, name)
     }
 
     // ---------------------------------------------------------------- viewer controller
@@ -260,12 +266,16 @@ private fun VertexaApp(activity: MainActivity, incoming: MutableStateFlow<Uri?>)
     }
 
     // ---------------------------------------------------------------- back
-    BackHandler(enabled = screen != Screen.Home && screen != Screen.Splash || choices != null || updatePhase.isOverlay()) {
+    fun goBack() {
+        val cur = screen
+        screen = if (cur is Screen.Viewer) cur.back else Screen.Home
+    }
+
+    BackHandler(enabled = screen != Screen.Home && screen != Screen.Splash || updatePhase.isOverlay()) {
         when {
-            choices != null -> choices = null
             updatePhase is UpdatePhase.Downloading || updatePhase is UpdatePhase.Installing -> {}
             updatePhase.isOverlay() -> updatePhase = UpdatePhase.Idle
-            else -> screen = Screen.Home
+            else -> goBack()
         }
     }
 
@@ -274,7 +284,7 @@ private fun VertexaApp(activity: MainActivity, incoming: MutableStateFlow<Uri?>)
             AnimatedContent(
                 targetState = screen,
                 transitionSpec = { fadeIn(tween(450)) togetherWith fadeOut(tween(350)) },
-                contentKey = { s -> if (s is Screen.Viewer) "viewer${s.id}" else s.toString() },
+                contentKey = { s -> when (s) { is Screen.Viewer -> "viewer${s.id}"; is Screen.Browser -> "browser${s.id}"; else -> s.toString() } },
                 label = "screens",
             ) { s ->
                 when (s) {
@@ -285,6 +295,9 @@ private fun VertexaApp(activity: MainActivity, incoming: MutableStateFlow<Uri?>)
                     }
                     Screen.Home -> HomeScreen(
                         recents = recents,
+                        folders = folders,
+                        onBrowseFolder = { f -> browseFolder(Uri.parse(f.uri), f.name) },
+                        onRemoveFolder = { f -> prefs.removeFolder(f.uri); folders = prefs.folders() },
                         updateAvailable = availableRelease?.version,
                         onOpenFiles = { pickFiles.launch(arrayOf("*/*")) },
                         onOpenFolder = { pickFolder.launch(null) },
@@ -302,11 +315,23 @@ private fun VertexaApp(activity: MainActivity, incoming: MutableStateFlow<Uri?>)
                         onCheckUpdates = { checkUpdates(silent = false) },
                         onBack = { screen = Screen.Home },
                     )
+                    is Screen.Browser -> BrowserScreen(
+                        title = s.title,
+                        items = browserItems,
+                        sortKey = sortKey,
+                        sortAsc = sortAsc,
+                        grid = browserGrid,
+                        onSort = { k, asc -> sortKey = k; sortAsc = asc; prefs.sortKey = k; prefs.sortAsc = asc },
+                        onGrid = { browserGrid = it; prefs.browserGrid = it },
+                        onOpen = { open(it.toSource()) },
+                        onRefresh = s.tree?.let { t -> { browseFolder(t, s.title) } },
+                        onBack = { screen = Screen.Home },
+                    )
                     is Screen.Viewer -> {
                         if (controller != null && controller.source == s.source) {
                             ViewerScreen(
                                 c = controller,
-                                onBack = { screen = Screen.Home },
+                                onBack = { goBack() },
                                 onLinkFolder = { linkFolder.launch(null) },
                                 onCycleTheme = {
                                     val next = ThemeMode.entries[(theme.ordinal + 1) % ThemeMode.entries.size]
@@ -318,14 +343,6 @@ private fun VertexaApp(activity: MainActivity, incoming: MutableStateFlow<Uri?>)
                         }
                     }
                 }
-            }
-
-            choices?.let { list ->
-                FolderPicker(
-                    models = list.map { it.label to it.size },
-                    onPick = { label -> list.firstOrNull { it.label == label }?.open?.invoke(); choices = null },
-                    onDismiss = { choices = null },
-                )
             }
 
             AnimatedVisibility(updatePhase.isOverlay(), enter = fadeIn(tween(400)), exit = fadeOut(tween(400))) {
@@ -347,10 +364,8 @@ private fun VertexaApp(activity: MainActivity, incoming: MutableStateFlow<Uri?>)
     }
 }
 
-private data class FoundModel(val uri: Uri, val path: String, val size: Long)
-
-private fun scanTree(ctx: android.content.Context, tree: Uri): List<FoundModel> {
-    val out = mutableListOf<FoundModel>()
+private fun scanTree(ctx: android.content.Context, tree: Uri): List<BrowseItem> {
+    val out = mutableListOf<BrowseItem>()
     val cr = ctx.contentResolver
     val rootId = DocumentsContract.getTreeDocumentId(tree)
     val proj = arrayOf(
@@ -358,6 +373,7 @@ private fun scanTree(ctx: android.content.Context, tree: Uri): List<FoundModel> 
         DocumentsContract.Document.COLUMN_DISPLAY_NAME,
         DocumentsContract.Document.COLUMN_MIME_TYPE,
         DocumentsContract.Document.COLUMN_SIZE,
+        DocumentsContract.Document.COLUMN_LAST_MODIFIED,
     )
     val queue = ArrayDeque<Triple<String, String, Int>>()
     queue.add(Triple(rootId, "", 0))
@@ -375,11 +391,12 @@ private fun scanTree(ctx: android.content.Context, tree: Uri): List<FoundModel> 
                         if (depth < 5) queue.add(Triple(cid, rel, depth + 1))
                     } else if (Formats.isModel(name)) {
                         val size = if (c.isNull(3)) -1L else c.getLong(3)
-                        out += FoundModel(DocumentsContract.buildDocumentUriUsingTree(tree, cid), rel, size)
+                        val mod = if (c.isNull(4)) 0L else c.getLong(4)
+                        out += BrowseItem(DocumentsContract.buildDocumentUriUsingTree(tree, cid), name, rel, size, mod, tree = tree)
                     }
                 }
             }
         }
     }
-    return out.sortedBy { it.path.lowercase() }
+    return out
 }

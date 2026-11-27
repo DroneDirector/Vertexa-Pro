@@ -1,7 +1,9 @@
 // Loader for FBX, glTF/GLB, DAE, 3DS, 3MF, DXF, X, OFF, LWO, BLEND, AC, MS3D via Assimp.
 // Files are read through the descriptor with pread, so nothing is copied up front;
 // external files (.bin buffers, textures) are resolved through the Resolver.
+#include <assimp/DefaultLogger.hpp>
 #include <assimp/IOStream.hpp>
+#include <assimp/LogStream.hpp>
 #include <assimp/IOSystem.hpp>
 #include <assimp/Importer.hpp>
 #include <assimp/ProgressHandler.hpp>
@@ -104,9 +106,35 @@ private:
     Sink& sink_;
 };
 
+class ReportStream : public Assimp::LogStream {
+public:
+    ReportStream(Sink& s, int level) : sink_(s), level_(level) {}
+    void write(const char* msg) override {
+        std::string m = trim(msg);
+        while (!m.empty() && (m.back() == '\n' || m.back() == '\r')) m.pop_back();
+        if (!m.empty() && count_++ < 60) sink_.log(level_, "Importer: " + m);
+    }
+
+private:
+    Sink& sink_;
+    int level_;
+    int count_ = 0;
+};
+
+std::mutex gLogMu;
+
 }  // namespace
 
 std::string loadAssimp(int fd, int64_t size, const std::string& name, Sink& sink, Resolver& res) {
+    std::lock_guard<std::mutex> logLock(gLogMu);  // Assimp's logger is global
+    Assimp::DefaultLogger::create("", Assimp::Logger::NORMAL, 0);
+    auto* warnStream = new ReportStream(sink, 1);
+    auto* errStream = new ReportStream(sink, 2);
+    Assimp::DefaultLogger::get()->attachStream(warnStream, Assimp::Logger::Warn);
+    Assimp::DefaultLogger::get()->attachStream(errStream, Assimp::Logger::Err);
+    struct LoggerGuard {
+        ~LoggerGuard() { Assimp::DefaultLogger::kill(); }
+    } loggerGuard;
     Assimp::Importer imp;
     imp.SetIOHandler(new FdIOSystem(fd, name, res));  // importer takes ownership
     imp.SetProgressHandler(new Progress(sink));
@@ -118,6 +146,11 @@ std::string loadAssimp(int fd, int64_t size, const std::string& name, Sink& sink
                                          aiProcess_SortByPType);
     ::close(fd);
     if (sink.cancel.load()) return "cancelled";
+    if (sc) {
+        sink.log(0, "Importer read " + std::to_string(sc->mNumMeshes) + " meshes, " + std::to_string(sc->mNumMaterials) +
+                        " materials, " + std::to_string(sc->mNumTextures) + " embedded textures");
+        if (sc->mFlags & AI_SCENE_FLAGS_INCOMPLETE) sink.log(1, "The importer marked the scene as incomplete.");
+    }
     if (!sc || !sc->mRootNode) {
         std::string e = imp.GetErrorString();
         return e.empty() ? "This file could not be read." : e;

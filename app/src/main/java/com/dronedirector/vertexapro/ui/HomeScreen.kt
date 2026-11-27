@@ -21,6 +21,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.FileOpen
+import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.SystemUpdate
@@ -37,6 +38,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.dronedirector.vertexapro.data.Formats
 import com.dronedirector.vertexapro.data.RecentModel
+import com.dronedirector.vertexapro.data.SavedFolder
+import android.net.Uri
+import androidx.compose.foundation.background
+import androidx.compose.ui.draw.clip
 import com.dronedirector.vertexapro.data.formatBytes
 import java.text.DateFormat
 import java.util.Date
@@ -45,6 +50,9 @@ import java.util.Date
 @Composable
 fun HomeScreen(
     recents: List<RecentModel>,
+    folders: List<SavedFolder>,
+    onBrowseFolder: (SavedFolder) -> Unit,
+    onRemoveFolder: (SavedFolder) -> Unit,
     updateAvailable: String?,
     onOpenFiles: () -> Unit,
     onOpenFolder: () -> Unit,
@@ -107,12 +115,40 @@ fun HomeScreen(
                     VSpace(12.dp)
                     GlassButton(
                         "Open from folder", Icons.Outlined.FolderOpen, p,
-                        subtitle = "Best for models with textures",
+                        subtitle = "Browse with thumbnails · best for textures",
                         modifier = Modifier.fillMaxWidth(),
                         onClick = onOpenFolder,
                     )
                     VSpace(30.dp)
                 }
+            }
+            if (folders.isNotEmpty()) {
+                item {
+                    Box(Modifier.fillMaxWidth().widthIn(max = 720.dp).padding(horizontal = 24.dp)) {
+                        SectionTitle("Folders", p)
+                    }
+                }
+                items(folders, key = { "f" + it.uri }) { f ->
+                    Row(
+                        Modifier.fillMaxWidth().widthIn(max = 720.dp).padding(horizontal = 24.dp, vertical = 5.dp)
+                            .glass(p, RoundedCornerShape(20.dp)).pressable { onBrowseFolder(f) }.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Box(
+                            Modifier.size(46.dp).clip(RoundedCornerShape(14.dp)).background(p.accentBrush, alpha = 0.2f),
+                            contentAlignment = Alignment.Center,
+                        ) { Icon(Icons.Outlined.Folder, null, tint = p.accent) }
+                        Spacer(Modifier.width(14.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(f.name, color = p.text, fontWeight = FontWeight.SemiBold, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text("Browse, sort and preview models", color = p.muted, fontSize = 12.sp)
+                        }
+                        Box(Modifier.size(36.dp).pressable { onRemoveFolder(f) }, contentAlignment = Alignment.Center) {
+                            Icon(Icons.Outlined.Close, "Remove", tint = p.muted, modifier = Modifier.size(18.dp))
+                        }
+                    }
+                }
+                item { VSpace(18.dp) }
             }
             if (recents.isNotEmpty()) {
                 item {
@@ -153,13 +189,17 @@ private fun RecentRow(r: RecentModel, p: Palette, onClick: () -> Unit, onRemove:
             .padding(12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        FormatBadge(Formats.ext(r.name), p)
+        ModelThumb(
+            thumbJobOf(Uri.parse(r.uri), r.name, r.size, r.extras.map(Uri::parse), r.tree?.let(Uri::parse), r.relPath),
+            Modifier.size(56.dp), corner = 14.dp, showBadge = false,
+        )
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {
             Text(r.name, color = p.text, fontWeight = FontWeight.SemiBold, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             val date = DateFormat.getDateInstance(DateFormat.MEDIUM).format(Date(r.time))
+            val ext = Formats.ext(r.name).uppercase()
             val extra = if (r.tree != null) " · folder" else if (r.extras.isNotEmpty()) " · +${r.extras.size} files" else ""
-            Text("${formatBytes(r.size)} · $date$extra", color = p.muted, fontSize = 12.sp, maxLines = 1)
+            Text("$ext · ${formatBytes(r.size)} · $date$extra", color = p.muted, fontSize = 12.sp, maxLines = 1)
         }
         Box(Modifier.size(36.dp).pressable(onRemove), contentAlignment = Alignment.Center) {
             Icon(Icons.Outlined.Close, "Remove", tint = p.muted, modifier = Modifier.size(18.dp))

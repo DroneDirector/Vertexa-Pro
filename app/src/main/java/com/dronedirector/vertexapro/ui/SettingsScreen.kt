@@ -10,15 +10,12 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -42,7 +39,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.dronedirector.vertexapro.update.UpdateManager
@@ -166,47 +162,6 @@ private fun ThemeCard(m: ThemeMode, selected: Boolean, modifier: Modifier, onCli
         }
         VSpace(8.dp)
         Text(m.label, color = p.text, fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium, fontSize = 14.sp)
-    }
-}
-
-/** Lets the user choose which model to open when a picked folder contains several. */
-@Composable
-fun FolderPicker(
-    models: List<Pair<String, Long>>,
-    onPick: (String) -> Unit,
-    onDismiss: () -> Unit,
-) {
-    val p = LocalPalette.current
-    Box(
-        Modifier.fillMaxSize().background(Color(0x99000000)).pressable(onDismiss),
-        contentAlignment = Alignment.Center,
-    ) {
-        Column(
-            Modifier.padding(24.dp).widthIn(max = 460.dp).glass(p, RoundedCornerShape(28.dp), strong = true)
-                .pressable { }.padding(20.dp),
-        ) {
-            Text("Choose a model", color = p.text, fontSize = 20.sp, fontWeight = FontWeight.Black)
-            Text("${models.size} models found in this folder", color = p.muted, fontSize = 13.sp)
-            VSpace(14.dp)
-            LazyColumn(Modifier.heightIn(max = 420.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(models) { (path, size) ->
-                    Row(
-                        Modifier.fillMaxWidth().glass(p, RoundedCornerShape(16.dp)).pressable { onPick(path) }.padding(10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        FormatBadge(path.substringAfterLast('.', ""), p, 40.dp)
-                        Spacer(Modifier.width(12.dp))
-                        Column(Modifier.weight(1f)) {
-                            Text(path.substringAfterLast('/'), color = p.text, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text(
-                                (path.substringBeforeLast('/', "").ifEmpty { "/" }) + " · " + com.dronedirector.vertexapro.data.formatBytes(size),
-                                color = p.muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                            )
-                        }
-                    }
-                }
-            }
-        }
     }
 }
 

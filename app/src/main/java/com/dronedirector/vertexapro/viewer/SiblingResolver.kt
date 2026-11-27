@@ -114,6 +114,12 @@ class SiblingResolver(
             }
         }.getOrNull() ?: -1L
 
+        fun modified(context: Context, uri: Uri): Long = runCatching {
+            context.contentResolver.query(uri, arrayOf(DocumentsContract.Document.COLUMN_LAST_MODIFIED), null, null, null)?.use { c ->
+                if (c.moveToFirst() && !c.isNull(0)) c.getLong(0) else 0L
+            }
+        }.getOrNull() ?: 0L
+
         /** Opens a file descriptor; content that can't be seeked (cloud streams) is copied to cache first. */
         fun openSeekableFd(context: Context, uri: Uri, requireSeek: Boolean = true): Int = runCatching {
             val cr = context.contentResolver

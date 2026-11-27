@@ -31,6 +31,35 @@ data class ModelSource(
     val relPath: String? = null,
 )
 
+enum class SortKey(val label: String) { NAME("Name"), DATE("Date"), SIZE("Size"), TYPE("Type") }
+
+/** A model shown in the browser. */
+data class BrowseItem(
+    val uri: Uri,
+    val name: String,
+    val relPath: String,
+    val size: Long,
+    val modified: Long,
+    val tree: Uri? = null,
+    val extras: List<Uri> = emptyList(),
+) {
+    val ext get() = Formats.ext(name)
+    fun toSource() = ModelSource(uri, name, size, extras, tree, if (tree != null) relPath else null)
+}
+
+fun sortItems(items: List<BrowseItem>, key: SortKey, asc: Boolean): List<BrowseItem> {
+    val byName = compareBy<BrowseItem, String>(String.CASE_INSENSITIVE_ORDER) { it.name }
+    val cmp: Comparator<BrowseItem> = when (key) {
+        SortKey.NAME -> byName
+        SortKey.DATE -> compareBy<BrowseItem> { it.modified }.then(byName)
+        SortKey.SIZE -> compareBy<BrowseItem> { it.size }.then(byName)
+        SortKey.TYPE -> compareBy<BrowseItem> { it.ext }.then(byName)
+    }
+    return items.sortedWith(if (asc) cmp else cmp.reversed())
+}
+
+data class SavedFolder(val uri: String, val name: String, val time: Long)
+
 data class RecentModel(
     val uri: String,
     val name: String,
@@ -63,6 +92,42 @@ class Prefs(context: Context) {
     var showGrid: Boolean
         get() = sp.getBoolean("grid", true)
         set(v) = sp.edit().putBoolean("grid", v).apply()
+
+    var sortKey: SortKey
+        get() = runCatching { SortKey.valueOf(sp.getString("sortKey", "DATE")!!) }.getOrDefault(SortKey.DATE)
+        set(v) = sp.edit().putString("sortKey", v.name).apply()
+
+    var sortAsc: Boolean
+        get() = sp.getBoolean("sortAsc", false)
+        set(v) = sp.edit().putBoolean("sortAsc", v).apply()
+
+    var browserGrid: Boolean
+        get() = sp.getBoolean("browserGrid", true)
+        set(v) = sp.edit().putBoolean("browserGrid", v).apply()
+
+    fun folders(): List<SavedFolder> {
+        val arr = runCatching { JSONArray(sp.getString("folders", "[]")) }.getOrElse { JSONArray() }
+        return (0 until arr.length()).mapNotNull { i ->
+            runCatching {
+                val o = arr.getJSONObject(i)
+                SavedFolder(o.getString("uri"), o.getString("name"), o.optLong("time"))
+            }.getOrNull()
+        }
+    }
+
+    fun addFolder(uri: String, name: String) {
+        val list = folders().filterNot { it.uri == uri }.toMutableList()
+        list.add(0, SavedFolder(uri, name, System.currentTimeMillis()))
+        saveFolders(list.take(20))
+    }
+
+    fun removeFolder(uri: String) = saveFolders(folders().filterNot { it.uri == uri })
+
+    private fun saveFolders(list: List<SavedFolder>) {
+        val arr = JSONArray()
+        list.forEach { arr.put(JSONObject().put("uri", it.uri).put("name", it.name).put("time", it.time)) }
+        sp.edit().putString("folders", arr.toString()).apply()
+    }
 
     fun recents(): List<RecentModel> {
         val arr = runCatching { JSONArray(sp.getString("recents", "[]")) }.getOrElse { JSONArray() }

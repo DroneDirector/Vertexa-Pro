@@ -144,10 +144,21 @@ public:
     std::vector<EmbeddedTexture> embedded;  // written by loader before finish only
     double origin[3] = {0, 0, 0};
 
+    // ---- load report: 0 = info, 1 = warning, 2 = error
+    void log(int level, const std::string& text) {
+        std::lock_guard<std::mutex> lk(m_);
+        if (logs_.size() < 600) logs_.push_back(std::to_string(level) + "|" + text);
+    }
+    std::vector<std::string> logs() {
+        std::lock_guard<std::mutex> lk(m_);
+        return logs_;
+    }
+
 private:
     std::mutex m_;
     std::deque<std::unique_ptr<Chunk>> queue_;
     std::vector<Material> materials_;
+    std::vector<std::string> logs_;
     Bounds bounds_;
 };
 

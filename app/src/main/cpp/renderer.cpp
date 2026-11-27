@@ -212,6 +212,19 @@ void Renderer::clearModel() {
     lastGen_ = -1;
 }
 
+void Renderer::releaseGl() {
+    clearModel();
+    if (meshProg_) glDeleteProgram(meshProg_);
+    if (bgProg_) glDeleteProgram(bgProg_);
+    if (gridProg_) glDeleteProgram(gridProg_);
+    meshProg_ = bgProg_ = gridProg_ = 0;
+    if (bgVao_) glDeleteVertexArrays(1, &bgVao_);
+    if (gridVao_) glDeleteVertexArrays(1, &gridVao_);
+    if (gridVbo_) glDeleteBuffers(1, &gridVbo_);
+    if (whiteTex_) glDeleteTextures(1, &whiteTex_);
+    bgVao_ = gridVao_ = gridVbo_ = whiteTex_ = 0;
+}
+
 void Renderer::setTexture(int material, int glTex) {
     auto it = textures_.find(material);
     if (it != textures_.end() && it->second != (GLuint)glTex) glDeleteTextures(1, &it->second);

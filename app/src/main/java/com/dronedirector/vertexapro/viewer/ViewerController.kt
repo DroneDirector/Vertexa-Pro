@@ -29,6 +29,9 @@ import kotlin.coroutines.resume
 
 enum class Phase { LOADING, READY, ERROR }
 
+/** One line of the load report. level: 0 info, 1 warning, 2 error. */
+data class ReportLine(val level: Int, val text: String)
+
 data class ModelStats(
     val vertices: Long = 0,
     val triangles: Long = 0,
@@ -84,6 +87,13 @@ class ViewerController(
         private set
     var loadMillis by mutableLongStateOf(0L)
         private set
+    var report by mutableStateOf<List<ReportLine>>(emptyList())
+        private set
+    private val appLines = mutableListOf<ReportLine>()
+    private val texLines = mutableListOf<ReportLine>()
+    @Volatile private var captureRequested = false
+    @Volatile private var surfaceW = 0
+    @Volatile private var surfaceH = 0
 
     var mode by mutableIntStateOf(initialMode)
         private set
@@ -110,15 +120,43 @@ class ViewerController(
         loadJob = scope.launch { load() }
     }
 
+    private fun info(level: Int, text: String) { synchronized(appLines) { appLines += ReportLine(level, text) } }
+
+    private fun rebuildReport() {
+        val native = (safe { NativeBridge.nativeReport(handle) } ?: emptyArray()).map {
+            val lvl = it.substringBefore('|').toIntOrNull() ?: 0
+            ReportLine(lvl, it.substringAfter('|'))
+        }
+        report = synchronized(appLines) { appLines.toList() } + native + synchronized(texLines) { texLines.toList() }
+    }
+
+    val warnings: Int get() = report.count { it.level >= 1 }
+
+    fun reportText(): String = buildString {
+        appendLine("Vertexa Pro ${com.dronedirector.vertexapro.BuildConfig.VERSION_NAME} — load report")
+        report.forEach { l -> appendLine((if (l.level == 2) "[ERROR] " else if (l.level == 1) "[WARN]  " else "        ") + l.text) }
+    }
+
     private suspend fun load() {
         phase = Phase.LOADING
         error = null
         progress = 0f
+        synchronized(appLines) { appLines.clear() }
+        synchronized(texLines) { texLines.clear() }
+        info(0, "Device: ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}, Android ${android.os.Build.VERSION.RELEASE}, " +
+            "max texture ${maxTex}px")
+        info(0, "Opened from: " + when {
+            source.tree != null -> "folder (${source.relPath ?: source.name})"
+            source.extras.isNotEmpty() -> "file picker with ${source.extras.size} extra file(s)"
+            else -> "file picker (model only)"
+        })
         val t0 = System.nanoTime()
         val needsSeek = Formats.ext(source.name) !in Formats.native
         val fd = withContext(Dispatchers.IO) { SiblingResolver.openSeekableFd(context, source.uri, needsSeek) }
         if (fd < 0) {
             error = "The file could not be opened. It may have been moved, deleted, or access has expired. Open it again from your files."
+            info(2, "Android refused to open the file (permission expired, file moved, or cloud file unavailable).")
+            rebuildReport()
             phase = Phase.ERROR
             return
         }
@@ -137,12 +175,14 @@ class ViewerController(
         progress = 1f
         view?.requestRender()
         if (err == "cancelled") return
+        loadMillis = (System.nanoTime() - t0) / 1_000_000
+        info(0, String.format(java.util.Locale.US, "Load time: %.1f s", loadMillis / 1000.0))
+        rebuildReport()
         if (err.isNotEmpty()) {
             error = err
             phase = Phase.ERROR
             return
         }
-        loadMillis = (System.nanoTime() - t0) / 1_000_000
         phase = Phase.READY
         // keep pumping frames until every chunk has reached the GPU
         scope.launch {
@@ -151,7 +191,14 @@ class ViewerController(
             }
             refreshStats()
         }
-        textureJob = scope.launch { loadTextures(null) }
+        textureJob = scope.launch {
+            loadTextures(null)
+            rebuildReport()
+            // grab a thumbnail of the finished view for the browser
+            delay(900)
+            captureRequested = true
+            view?.requestRender()
+        }
     }
 
     private fun refreshStats() {
@@ -169,6 +216,7 @@ class ViewerController(
             .groupBy({ it.value }, { it.index })
         if (groups.isEmpty()) return
         if (only == null) {
+            synchronized(texLines) { texLines += ReportLine(0, "Textures referenced: ${groups.size}") }
             texturesTotal = groups.size
             texturesLoaded = 0
         }
@@ -179,6 +227,7 @@ class ViewerController(
         }.coerceAtMost(maxTex)
         val miss = mutableListOf<String>()
         for ((name, mats) in groups) {
+            var reason = ""
             val bmp: Bitmap? = withContext(Dispatchers.IO) {
                 runCatching {
                     if (name.startsWith("*")) {
@@ -191,19 +240,24 @@ class ViewerController(
                             else -> TextureDecoder.decodeBytes(data, cap)
                         }
                     } else {
-                        resolver.findUri(name)?.let { TextureDecoder.decodeUri(context, it, name, cap) }
+                        val u = resolver.findUri(name)
+                        if (u == null) { reason = "not found"; null }
+                        else TextureDecoder.decodeUri(context, u, name, cap).also { if (it == null) reason = "found, but the image format can't be read" }
                     }
-                }.getOrNull()
+                }.getOrElse { e -> reason = "error: ${e.message}"; null }
             }
             scope.coroutineContext.ensureActive()
             if (bmp == null) {
                 miss += name
+                synchronized(texLines) { texLines += ReportLine(1, "Texture \"$name\": ${reason.ifEmpty { "could not be decoded" }}") }
                 continue
             }
+            synchronized(texLines) { texLines += ReportLine(0, "Texture \"$name\": loaded ${bmp.width}×${bmp.height}") }
             upload(bmp, mats)
             texturesLoaded++
         }
         missing = if (only == null) miss else missing.filter { it in miss }
+        rebuildReport()
         view?.requestRender()
     }
 
@@ -255,10 +309,27 @@ class ViewerController(
     }
 
     fun onSurfaceChanged(w: Int, h: Int) {
+        surfaceW = w
+        surfaceH = h
         safe { NativeBridge.nativeSurfaceChanged(handle, w, h) }
     }
 
-    fun onDrawFrame(): Boolean = safe { NativeBridge.nativeDraw(handle, System.nanoTime()) } ?: false
+    fun onDrawFrame(): Boolean {
+        val more = safe { NativeBridge.nativeDraw(handle, System.nanoTime()) } ?: return false
+        if (captureRequested && surfaceW > 0 && surfaceH > 0) {
+            captureRequested = false
+            val side = minOf(surfaceW, surfaceH)
+            val x = (surfaceW - side) / 2
+            val y = (surfaceH - side) / 2
+            val buf = java.nio.ByteBuffer.allocateDirect(side * side * 4).order(java.nio.ByteOrder.nativeOrder())
+            GLES30.glReadPixels(x, y, side, side, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, buf)
+            val src = source
+            CoroutineScope(Dispatchers.IO).launch {
+                runCatching { ThumbnailStore.save(context, src.uri, ThumbnailStore.fromPixels(buf, side, side)) }
+            }
+        }
+        return more
+    }
 
     // ---------------------------------------------------------------- input & settings
     fun touchDown() { safe { NativeBridge.nativeTouchDown(handle) } }

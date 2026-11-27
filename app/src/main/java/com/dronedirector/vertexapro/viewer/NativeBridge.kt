@@ -15,12 +15,14 @@ object NativeBridge {
     @JvmStatic external fun nativeEmbeddedSize(h: Long, idx: Int): IntArray
     @JvmStatic external fun nativeEmbeddedData(h: Long, idx: Int): ByteArray?
     @JvmStatic external fun nativeBounds(h: Long): DoubleArray
+    @JvmStatic external fun nativeReport(h: Long): Array<String>
 
     // GL thread only
     @JvmStatic external fun nativeSurfaceCreated(h: Long): Boolean
     @JvmStatic external fun nativeSurfaceChanged(h: Long, w: Int, hgt: Int)
     @JvmStatic external fun nativeDraw(h: Long, nanos: Long): Boolean
     @JvmStatic external fun nativeClearModel(h: Long)
+    @JvmStatic external fun nativeReleaseGl(h: Long)
     @JvmStatic external fun nativeSetTexture(h: Long, material: Int, tex: Int)
 
     // any thread

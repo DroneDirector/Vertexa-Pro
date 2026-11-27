@@ -15,6 +15,7 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -24,6 +25,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -38,6 +40,10 @@ import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.AutoAwesomeMosaic
 import androidx.compose.material.icons.outlined.CenterFocusStrong
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.Share
+import androidx.compose.material.icons.outlined.WarningAmber
+import androidx.compose.material.icons.automirrored.outlined.Assignment
 import androidx.compose.material.icons.outlined.Contrast
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Grid4x4
@@ -107,6 +113,7 @@ fun ViewerScreen(
 ) {
     val p = LocalPalette.current
     var showInfo by remember { mutableStateOf(false) }
+    var showReport by remember { mutableStateOf(false) }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     var surface by remember { mutableStateOf<ModelSurfaceView?>(null) }
 
@@ -149,7 +156,18 @@ fun ViewerScreen(
                 )
             }
             Spacer(Modifier.width(10.dp))
-            RoundIconButton(Icons.Outlined.Info, p, active = showInfo, contentDescription = "Model info") { showInfo = !showInfo }
+            Box {
+                RoundIconButton(Icons.Outlined.Info, p, active = showInfo, contentDescription = "Model info") { showInfo = !showInfo }
+                val errs = c.report.count { it.level == 2 }
+                val warns = c.report.count { it.level == 1 }
+                if (errs + warns > 0) {
+                    Box(
+                        Modifier.align(Alignment.TopEnd).size(14.dp).clip(CircleShape)
+                            .background(if (errs > 0) p.danger else Color(0xFFF5B342))
+                            .border(2.dp, p.viewBottom, CircleShape),
+                    )
+                }
+            }
         }
 
         // ---------------- right rail
@@ -261,7 +279,10 @@ fun ViewerScreen(
                 VSpace(6.dp)
                 Text(c.error ?: "", color = p.muted, fontSize = 13.sp, textAlign = TextAlign.Center)
                 VSpace(18.dp)
-                GradientButton("Back", null, p, onClick = onBack)
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    GlassButton("Details", Icons.AutoMirrored.Outlined.Assignment, p) { showReport = true }
+                    GradientButton("Back", null, p, onClick = onBack)
+                }
             }
         }
 
@@ -270,7 +291,12 @@ fun ViewerScreen(
             showInfo, enter = fadeIn() + slideInVertically { it / 3 }, exit = fadeOut() + slideOutVertically { it / 3 },
             modifier = Modifier.align(Alignment.Center),
         ) {
-            InfoPanel(c, p) { showInfo = false }
+            InfoPanel(c, p, onReport = { showInfo = false; showReport = true }) { showInfo = false }
+        }
+
+        // ---------------- load report
+        AnimatedVisibility(showReport, enter = fadeIn(), exit = fadeOut()) {
+            ReportPanel(c, p) { showReport = false }
         }
     }
 }
@@ -362,7 +388,7 @@ private fun MissingBanner(names: List<String>, p: Palette, onLink: () -> Unit, o
 }
 
 @Composable
-private fun InfoPanel(c: ViewerController, p: Palette, onClose: () -> Unit) {
+private fun InfoPanel(c: ViewerController, p: Palette, onReport: () -> Unit, onClose: () -> Unit) {
     val s = c.stats
     Column(
         Modifier.padding(24.dp).widthIn(max = 380.dp).glass(p, RoundedCornerShape(28.dp), strong = true).padding(22.dp),
@@ -397,6 +423,13 @@ private fun InfoPanel(c: ViewerController, p: Palette, onClose: () -> Unit) {
             }
             Box(Modifier.fillMaxWidth().height(1.dp).background(p.border))
         }
+        VSpace(14.dp)
+        val issues = c.report.count { it.level >= 1 }
+        GlassButton(
+            "Load report", Icons.AutoMirrored.Outlined.Assignment, p, Modifier.fillMaxWidth(),
+            subtitle = if (issues > 0) "$issues warning${if (issues > 1) "s" else ""} — tap to see what happened" else "How the file was read",
+            onClick = onReport,
+        )
         VSpace(12.dp)
         Text(
             "Drag to orbit · pinch to zoom · two fingers to pan · double-tap to recentre",
@@ -414,3 +447,86 @@ private fun dims(d: DoubleArray, upZ: Boolean): String {
     if (d.all { it == 0.0 }) return "—"
     return if (upZ) "${f(d[0])} × ${f(d[2])} × ${f(d[1])}" else "${f(d[0])} × ${f(d[1])} × ${f(d[2])}"
 }
+
+@Composable
+fun ReportPanel(c: ViewerController, p: Palette, onClose: () -> Unit) {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+    val lines = c.report
+    val errors = lines.count { it.level == 2 }
+    val warns = lines.count { it.level == 1 }
+    Box(
+        Modifier.fillMaxSize().background(Color(0x99000000)).pressable(onClose),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            Modifier.statusBarsPadding().navigationBarsPadding().padding(16.dp).widthIn(max = 560.dp)
+                .glass(p, RoundedCornerShape(26.dp), strong = true).pressable { }.padding(18.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Load report", color = p.text, fontSize = 20.sp, fontWeight = FontWeight.Black)
+                    Text(
+                        when {
+                            errors > 0 -> "$errors problem${if (errors > 1) "s" else ""}, $warns warning${if (warns != 1) "s" else ""}"
+                            warns > 0 -> "$warns warning${if (warns != 1) "s" else ""}"
+                            else -> "No problems found"
+                        },
+                        color = if (errors > 0) p.danger else if (warns > 0) Color(0xFFF5B342) else p.muted, fontSize = 13.sp,
+                    )
+                }
+                Box(Modifier.size(36.dp).clip(CircleShape).pressable(onClose), contentAlignment = Alignment.Center) {
+                    Icon(Icons.Outlined.Close, "Close", tint = p.muted, modifier = Modifier.size(20.dp))
+                }
+            }
+            VSpace(12.dp)
+            androidx.compose.foundation.lazy.LazyColumn(
+                Modifier.fillMaxWidth().weight(1f, fill = false).heightIn(max = 520.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                items(lines.size) { i ->
+                    val l = lines[i]
+                    Row(
+                        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                            .background(
+                                when (l.level) {
+                                    2 -> p.danger.copy(alpha = 0.14f)
+                                    1 -> Color(0x22F5B342)
+                                    else -> p.glass
+                                },
+                            )
+                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                    ) {
+                        Icon(
+                            when (l.level) {
+                                2 -> Icons.Outlined.ErrorOutline
+                                1 -> Icons.Outlined.WarningAmber
+                                else -> Icons.Outlined.Info
+                            },
+                            null,
+                            tint = when (l.level) { 2 -> p.danger; 1 -> Color(0xFFF5B342); else -> p.muted },
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(l.text, color = p.text, fontSize = 13.sp, lineHeight = 17.sp)
+                    }
+                }
+            }
+            VSpace(14.dp)
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                GlassButton("Copy", Icons.Outlined.ContentCopy, p, Modifier.weight(1f)) {
+                    clipboard.setText(androidx.compose.ui.text.AnnotatedString(c.reportText()))
+                    android.widget.Toast.makeText(ctx, "Report copied", android.widget.Toast.LENGTH_SHORT).show()
+                }
+                GradientButton("Share", Icons.Outlined.Share, p, Modifier.weight(1f)) {
+                    val send = android.content.Intent(android.content.Intent.ACTION_SEND)
+                        .setType("text/plain")
+                        .putExtra(android.content.Intent.EXTRA_SUBJECT, "Vertexa Pro load report — ${c.source.name}")
+                        .putExtra(android.content.Intent.EXTRA_TEXT, c.reportText())
+                    ctx.startActivity(android.content.Intent.createChooser(send, "Share load report"))
+                }
+            }
+        }
+    }
+}
+
