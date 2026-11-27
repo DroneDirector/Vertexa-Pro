@@ -27,7 +27,6 @@ endforeach()
 FetchContent_Declare(
     assimp
     URL https://github.com/assimp/assimp/archive/refs/tags/v5.4.3.tar.gz
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 FetchContent_MakeAvailable(assimp)
 
