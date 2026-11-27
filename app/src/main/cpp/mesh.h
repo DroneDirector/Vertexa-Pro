@@ -138,6 +138,26 @@ public:
         std::lock_guard<std::mutex> lk(m_);
         return parts_;
     }
+    /** Replaces triangle/vertex counts and bounds (after edits); names are kept. */
+    void setPartStats(const std::vector<PartInfo>& stats) {
+        std::lock_guard<std::mutex> lk(m_);
+        for (size_t i = 0; i < parts_.size(); i++) {
+            if (i < stats.size()) {
+                parts_[i].triangles = stats[i].triangles;
+                parts_[i].vertices = stats[i].vertices;
+                parts_[i].bounds = stats[i].bounds;
+            } else {
+                parts_[i].triangles = parts_[i].vertices = 0;
+                parts_[i].bounds = Bounds();
+            }
+        }
+        generation++;
+    }
+    void renamePart(int i, const std::string& name) {
+        std::lock_guard<std::mutex> lk(m_);
+        if (i >= 0 && i < (int)parts_.size()) parts_[i].name = name;
+        generation++;
+    }
     std::unique_ptr<Chunk> pop() {
         std::lock_guard<std::mutex> lk(m_);
         if (queue_.empty()) return nullptr;

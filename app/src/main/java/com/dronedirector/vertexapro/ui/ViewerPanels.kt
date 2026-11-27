@@ -163,7 +163,7 @@ fun PartsPanel(c: ViewerController, p: Palette, onClose: () -> Unit) {
 
 /** Floating actions for the part selected in the view. */
 @Composable
-fun SelectedPartBar(c: ViewerController, p: Palette) {
+fun SelectedPartBar(c: ViewerController, p: Palette, onRename: () -> Unit) {
     val part = c.parts.firstOrNull { it.index == c.selectedPart } ?: return
     Row(
         Modifier.padding(bottom = 10.dp).widthIn(max = 560.dp).glass(p, RoundedCornerShape(22.dp), strong = true)
@@ -177,6 +177,8 @@ fun SelectedPartBar(c: ViewerController, p: Palette) {
             Text(if (part.triangles > 0) "${formatCount(part.triangles)} triangles" else "${formatCount(part.points)} points", color = p.muted, fontSize = 11.sp)
         }
         Spacer(Modifier.width(8.dp))
+        PillChip("Rename", false, p) { onRename() }
+        Spacer(Modifier.width(6.dp))
         PillChip("Focus", false, p) { c.focusPart(part.index) }
         Spacer(Modifier.width(6.dp))
         PillChip("Isolate", false, p) { c.isolatePart(part.index) }
@@ -284,10 +286,17 @@ fun ExportPanel(c: ViewerController, p: Palette, onPickFolder: (Int, Boolean) ->
             PillChip("OBJ + MTL + textures", format == 0, p) { format = 0 }
             PillChip("STL", format == 1, p) { format = 1 }
         }
+        if (c.parts.size > 1 && c.canEdit) {
+            VSpace(6.dp)
+            PillChip("STL · one file per part", format == 2, p) { format = 2 }
+        }
         VSpace(6.dp)
         Text(
-            if (format == 0) "Every part is saved as its own object, in place. Textures are copied next to it."
-            else "Binary STL for 3D printing (geometry only).",
+            when (format) {
+                0 -> "Every part is saved as its own object, in place. Textures are copied next to it."
+                1 -> "Binary STL for 3D printing (geometry only), all parts in one file."
+                else -> "A separate STL for every visible part, each in its original position."
+            },
             color = p.muted, fontSize = 12.sp,
         )
         if (c.parts.size > 1) {

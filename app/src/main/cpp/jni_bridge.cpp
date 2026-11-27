@@ -1,5 +1,6 @@
 #include <jni.h>
 
+#include <algorithm>
 #include <string>
 
 #include "engine.h"
@@ -136,6 +137,103 @@ JNIEXPORT jstring JNICALL FN(nativeExport)(JNIEnv* env, jobject, jlong h, jint i
     e->exportProgress = 0.f;
     e->exportCancel = false;
     std::string err = exportModel(inFd, size, str(name), res, opt, e->exportProgress, e->exportCancel);
+    return env->NewStringUTF(safeUtf8(err).c_str());
+}
+
+JNIEXPORT jboolean JNICALL FN(nativeCanEdit)(JNIEnv*, jobject, jlong h) { return E(h)->renderer.canEdit(); }
+JNIEXPORT jboolean JNICALL FN(nativeHasUndo)(JNIEnv*, jobject, jlong h) { return E(h)->renderer.hasUndo(); }
+JNIEXPORT void JNICALL FN(nativeSetCpuBudget)(JNIEnv*, jobject, jlong h, jlong bytes) {
+    E(h)->renderer.setCpuBudget((size_t)std::max<jlong>(bytes, 64L << 20));
+}
+
+JNIEXPORT jfloatArray JNICALL FN(nativeRaycast)(JNIEnv* env, jobject, jlong h, jfloat x, jfloat y) {
+    float p[3];
+    if (!E(h)->renderer.raycast(x, y, p)) return nullptr;
+    jfloatArray a = env->NewFloatArray(3);
+    env->SetFloatArrayRegion(a, 0, 3, p);
+    return a;
+}
+
+JNIEXPORT jfloatArray JNICALL FN(nativeProject)(JNIEnv* env, jobject, jlong h, jfloatArray pts) {
+    jsize n = env->GetArrayLength(pts) / 3;
+    std::vector<float> in(n * 3), out(n * 2);
+    if (n) env->GetFloatArrayRegion(pts, 0, n * 3, in.data());
+    E(h)->renderer.project(in.data(), n, out.data());
+    jfloatArray a = env->NewFloatArray(n * 2);
+    if (n) env->SetFloatArrayRegion(a, 0, n * 2, out.data());
+    return a;
+}
+
+JNIEXPORT jstring JNICALL FN(nativeCut)(JNIEnv* env, jobject, jlong h, jfloatArray pts, jint mode, jstring name) {
+    Renderer::CutRequest req;
+    jsize n = env->GetArrayLength(pts);
+    req.points.resize(n);
+    if (n) env->GetFloatArrayRegion(pts, 0, n, req.points.data());
+    req.mode = mode;
+    const char* c = env->GetStringUTFChars(name, nullptr);
+    req.name = c;
+    env->ReleaseStringUTFChars(name, c);
+    auto s = E(h)->sink();
+    Renderer::CutResult r;
+    try {
+        r = E(h)->renderer.cut(req, s.get());
+    } catch (const std::bad_alloc&) {
+        r.error = "The device ran out of memory while cutting.";
+    }
+    std::string out = r.error.empty()
+        ? std::to_string(r.part) + "|" + std::to_string(r.triangles) + "|" + std::to_string(r.capTriangles)
+        : "ERR|" + r.error;
+    return env->NewStringUTF(safeUtf8(out).c_str());
+}
+
+JNIEXPORT jboolean JNICALL FN(nativeUndoCut)(JNIEnv*, jobject, jlong h) {
+    auto s = E(h)->sink();
+    return E(h)->renderer.undoCut(s.get());
+}
+
+JNIEXPORT void JNICALL FN(nativeRenamePart)(JNIEnv* env, jobject, jlong h, jint i, jstring name) {
+    auto s = E(h)->sink();
+    if (!s) return;
+    const char* c = env->GetStringUTFChars(name, nullptr);
+    s->renamePart(i, c);
+    env->ReleaseStringUTFChars(name, c);
+}
+
+JNIEXPORT jstring JNICALL FN(nativeExportMemory)(JNIEnv* env, jobject, jlong h, jint format, jint outFd, jint mtlFd,
+                                                 jstring mtlName, jbooleanArray hidden, jobjectArray textures,
+                                                 jint onlyPart) {
+    ExportOptions opt;
+    opt.format = format;
+    opt.outFd = outFd;
+    opt.mtlFd = mtlFd;
+    opt.onlyPart = onlyPart;
+    if (mtlName) {
+        const char* c = env->GetStringUTFChars(mtlName, nullptr);
+        opt.mtlName = c;
+        env->ReleaseStringUTFChars(mtlName, c);
+    }
+    if (hidden) {
+        jsize n = env->GetArrayLength(hidden);
+        std::vector<jboolean> b(n);
+        if (n) env->GetBooleanArrayRegion(hidden, 0, n, b.data());
+        for (auto x : b) opt.hidden.push_back(x ? 1 : 0);
+    }
+    if (textures) {
+        jsize n = env->GetArrayLength(textures);
+        for (jsize i = 0; i < n; i++) {
+            auto js = (jstring)env->GetObjectArrayElement(textures, i);
+            std::string t;
+            if (js) {
+                const char* c = env->GetStringUTFChars(js, nullptr);
+                t = c;
+                env->ReleaseStringUTFChars(js, c);
+                env->DeleteLocalRef(js);
+            }
+            opt.textures.push_back(t);
+        }
+    }
+    auto s = E(h)->sink();
+    std::string err = E(h)->renderer.exportMemory(opt, s.get());
     return env->NewStringUTF(safeUtf8(err).c_str());
 }
 

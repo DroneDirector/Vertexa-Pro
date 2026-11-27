@@ -12,6 +12,8 @@
 
 namespace vx {
 
+struct ExportOptions;
+
 enum Mode {
     MODE_TEXTURED = 0,
     MODE_SOLID = 1,
@@ -44,6 +46,31 @@ public:
     void beginTurntable();
     void turntableFrame(double angle, int w, int h);
     void endTurntable();
+
+    // ---- editing (worker thread; uses the in-memory copy of the geometry)
+    struct CutRequest {
+        std::vector<float> points;  // lasso corners in model space (x, y, z) * n
+        int mode = 0;               // 0 cut through, 1 surface only, 2 one wall (outer + inner skin)
+        std::string name;
+    };
+    struct CutResult {
+        int part = -1;
+        int64_t triangles = 0, capTriangles = 0;
+        std::string error;
+    };
+    bool canEdit() { std::lock_guard<std::mutex> l(dataMu_); return keepCpu_ && !cpu_.empty(); }
+    CutResult cut(const CutRequest& req, Sink* sink);
+    bool undoCut(Sink* sink);
+    bool hasUndo() { std::lock_guard<std::mutex> l(dataMu_); return !undo_.empty(); }
+    /** Ray from a screen point; returns true and the model-space hit point. */
+    bool raycast(float sx, float sy, float out[3]);
+    /** Projects model-space points to screen pixels (NaN when behind the camera). */
+    void project(const float* in, int n, float* out);
+    /** Saves the geometry held in memory (including edits). */
+    std::string exportMemory(const ExportOptions& opt, Sink* sink);
+    struct CutCam;
+    bool cutCamera(CutCam& cc);
+    void setCpuBudget(size_t bytes) { std::lock_guard<std::mutex> l(dataMu_); cpuBudget_ = bytes; }
 
     // any thread
     void setMode(int m) { std::lock_guard<std::mutex> l(mu_); mode_ = m; }
@@ -96,6 +123,8 @@ private:
     };
 
     void upload(std::unique_ptr<Chunk> c);
+    void uploadGpu(const Chunk& c);
+    void recomputeParts(Sink* sink);  // call with dataMu_ held
     void fitCamera(Cam& out, const Bounds& b, bool keepAngles = false) const;
     Bounds rotatedBounds(const Bounds& b) const;
     void buildPrograms();
@@ -145,6 +174,13 @@ private:
     GLuint pickFbo_ = 0, pickColor_ = 0, pickDepth_ = 0;
     int pickW_ = 0, pickH_ = 0;
     std::vector<Gpu> gpu_;
+    std::mutex dataMu_;
+    std::vector<std::shared_ptr<Chunk>> cpu_;   // geometry kept for editing and saving
+    std::vector<std::shared_ptr<Chunk>> undo_;  // geometry before the last cut
+    bool keepCpu_ = true;
+    bool rebuildGpu_ = false;
+    size_t cpuBytes_ = 0;
+    size_t cpuBudget_ = (size_t)1500 << 20;
     std::map<int, GLuint> textures_;
     std::vector<Material> materials_;
     Bounds bounds_;

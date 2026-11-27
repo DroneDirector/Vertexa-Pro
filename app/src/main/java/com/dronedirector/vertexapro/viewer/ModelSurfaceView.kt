@@ -30,7 +30,7 @@ class ModelSurfaceView(context: Context, private val controller: ViewerControlle
         }
 
         override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
-            controller.pick(e.x, e.y)
+            controller.onTap(e.x, e.y)
             return true
         }
     })

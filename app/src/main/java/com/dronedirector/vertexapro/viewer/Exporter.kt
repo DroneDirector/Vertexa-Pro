@@ -12,6 +12,7 @@ import java.io.File
 object Exporter {
     const val OBJ = 0
     const val STL = 1
+    const val STL_PER_PART = 2
 
     private fun parentDoc(tree: Uri): Uri =
         DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
@@ -35,10 +36,32 @@ object Exporter {
         hidden: BooleanArray,
         materialTextures: Array<String>,
         split: Boolean,
+        fromMemory: Boolean = false,
+        partNames: Map<Int, String> = emptyMap(),
     ): String {
         val cr = ctx.contentResolver
         val parent = parentDoc(tree)
         val base = safeBase(src.name)
+        if (format == STL_PER_PART) {
+            if (!fromMemory) error("One file per part needs the model in memory — it's too large on this device. Use a single STL instead.")
+            val created = mutableListOf<Uri>()
+            try {
+                var count = 0
+                for ((index, pname) in partNames.toSortedMap()) {
+                    if (index < hidden.size && hidden[index]) continue
+                    val file = "${base}_${safeBase(pname + ".x")}.stl"
+                    val u = create(ctx, parent, file).also { created += it }
+                    val fd = cr.openFileDescriptor(u, "rw")?.detachFd() ?: error("Couldn't open $file.")
+                    val err = NativeBridge.nativeExportMemory(handle, STL, fd, -1, "", hidden, emptyArray(), index)
+                    if (err.isNotEmpty()) error(err)
+                    count++
+                }
+                return "Saved $count STL file${if (count == 1) "" else "s"} — one per part."
+            } catch (e: Exception) {
+                created.forEach { runCatching { DocumentsContract.deleteDocument(cr, it) } }
+                throw e
+            }
+        }
         val ext = if (format == OBJ) "obj" else "stl"
         val created = mutableListOf<Uri>()
         try {
@@ -62,12 +85,17 @@ object Exporter {
                 }
                 texCount = written.values.count { it.isNotEmpty() }
             }
-            val needsSeek = Formats.ext(src.name) !in Formats.native
-            val inFd = SiblingResolver.openSeekableFd(ctx, src.uri, needsSeek)
-            if (inFd < 0) error("Couldn't read the model file again.")
-            val err = NativeBridge.nativeExport(
-                handle, inFd, src.size, src.name, resolver, format, outFd, mtlFd, mtlName, hidden, texNames, split,
-            )
+            val err = if (fromMemory) {
+                // the in-memory geometry includes every cut and split
+                NativeBridge.nativeExportMemory(handle, format, outFd, mtlFd, mtlName, hidden, texNames, -1)
+            } else {
+                val needsSeek = Formats.ext(src.name) !in Formats.native
+                val inFd = SiblingResolver.openSeekableFd(ctx, src.uri, needsSeek)
+                if (inFd < 0) error("Couldn't read the model file again.")
+                NativeBridge.nativeExport(
+                    handle, inFd, src.size, src.name, resolver, format, outFd, mtlFd, mtlName, hidden, texNames, split,
+                )
+            }
             if (err.isNotEmpty()) error(if (err == "cancelled") "Export cancelled." else err)
             val outName = nameOf(ctx, outUri, "$base.$ext")
             return if (format == OBJ) "Saved $outName with its material file" +

@@ -22,6 +22,17 @@ object NativeBridge {
         h: Long, inFd: Int, size: Long, name: String, resolver: SiblingResolver, format: Int,
         outFd: Int, mtlFd: Int, mtlName: String, hidden: BooleanArray, textures: Array<String>, split: Boolean,
     ): String
+    @JvmStatic external fun nativeExportMemory(
+        h: Long, format: Int, outFd: Int, mtlFd: Int, mtlName: String, hidden: BooleanArray, textures: Array<String>, onlyPart: Int,
+    ): String
+    @JvmStatic external fun nativeCanEdit(h: Long): Boolean
+    @JvmStatic external fun nativeHasUndo(h: Long): Boolean
+    @JvmStatic external fun nativeSetCpuBudget(h: Long, bytes: Long)
+    @JvmStatic external fun nativeRaycast(h: Long, x: Float, y: Float): FloatArray?
+    @JvmStatic external fun nativeProject(h: Long, pts: FloatArray): FloatArray
+    @JvmStatic external fun nativeCut(h: Long, pts: FloatArray, mode: Int, name: String): String
+    @JvmStatic external fun nativeUndoCut(h: Long): Boolean
+    @JvmStatic external fun nativeRenamePart(h: Long, part: Int, name: String)
     @JvmStatic external fun nativeExportProgress(h: Long): Float
     @JvmStatic external fun nativeExportCancel(h: Long)
 

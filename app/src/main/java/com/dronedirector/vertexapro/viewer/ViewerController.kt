@@ -136,6 +136,23 @@ class ViewerController(
     var pointColorMode by mutableIntStateOf(0)
         private set
 
+    // cut tool
+    var canEdit by mutableStateOf(false)
+        private set
+    var cutActive by mutableStateOf(false)
+        private set
+    var cutMode by mutableIntStateOf(0)
+    val cutPoints = androidx.compose.runtime.mutableStateListOf<FloatArray>()
+    var askConnect by mutableStateOf(false)
+    var createPartOpen by mutableStateOf(false)
+    var cutBusy by mutableStateOf(false)
+        private set
+    var cutHint by mutableStateOf<String?>(null)
+    var lastCut by mutableStateOf<String?>(null)
+    var hasUndo by mutableStateOf(false)
+        private set
+    private var cutCount = 0
+
     // snapshot / video / export
     var job by mutableStateOf<JobState?>(null)
     val isArchive get() = loadSource.uri != source.uri
@@ -148,6 +165,9 @@ class ViewerController(
         pointSize = (context.resources.displayMetrics.density * 1.6f).coerceIn(1.5f, 6f)
         NativeBridge.nativeSetPointScale(handle, pointSize)
         NativeBridge.nativeSetTheme(handle, palette.nativeTheme())
+        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+        val mi = android.app.ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }
+        NativeBridge.nativeSetCpuBudget(handle, (mi.totalMem / 4).coerceIn(256L shl 20, 4096L shl 20))
     }
 
     private inline fun <T> safe(block: () -> T): T? = synchronized(lock) { if (destroyed) null else block() }
@@ -244,6 +264,8 @@ class ViewerController(
             return
         }
         phase = Phase.READY
+        canEdit = safe { NativeBridge.nativeCanEdit(handle) } ?: false
+        if (!canEdit) info(1, "The model is too large to keep a second copy in memory, so the cut tool and saving edits are off for it.")
         // keep pumping frames until every chunk has reached the GPU
         scope.launch {
             while (isActive && (safe { NativeBridge.nativeStats(handle)[5] } ?: 0L) > 0L) {
@@ -442,6 +464,131 @@ class ViewerController(
         view?.requestRender()
     }
 
+    // ---------------------------------------------------------------- cut tool
+    fun onTap(x: Float, y: Float) {
+        if (cutActive) addCutPoint(x, y) else pick(x, y)
+    }
+
+    fun startCut() {
+        if (!canEdit) { cutHint = "This model is too large to edit on this device."; return }
+        cutActive = true
+        cutPoints.clear()
+        askConnect = false
+        createPartOpen = false
+        lastCut = null
+        selectPart(-1)
+        cutHint = "Tap points on the model around the area. Drag to rotate between taps."
+        safe { NativeBridge.nativeSetAutoRotate(handle, false) }
+        autoRotate = false
+    }
+
+    fun cancelCut() {
+        cutActive = false
+        cutPoints.clear()
+        askConnect = false
+        createPartOpen = false
+        cutHint = null
+        view?.requestRender()
+    }
+
+    fun undoCutPoint() {
+        if (cutPoints.isNotEmpty()) cutPoints.removeAt(cutPoints.size - 1)
+        askConnect = false
+    }
+
+    /** Screen positions of the cut points for the overlay (NaN when behind the camera). */
+    fun projectCutPoints(): FloatArray {
+        if (cutPoints.isEmpty()) return FloatArray(0)
+        val flat = FloatArray(cutPoints.size * 3)
+        cutPoints.forEachIndexed { i, p -> System.arraycopy(p, 0, flat, i * 3, 3) }
+        return safe { NativeBridge.nativeProject(handle, flat) } ?: FloatArray(0)
+    }
+
+    private fun addCutPoint(x: Float, y: Float) {
+        if (askConnect || createPartOpen || cutBusy) return
+        val density = context.resources.displayMetrics.density
+        if (cutPoints.size >= 3) {
+            val pr = projectCutPoints()
+            if (pr.size >= 2 && !pr[0].isNaN() && kotlin.math.hypot(pr[0] - x, pr[1] - y) < 34 * density) {
+                askConnect = true
+                return
+            }
+        }
+        scope.launch {
+            val hit = withContext(Dispatchers.Default) { safe { NativeBridge.nativeRaycast(handle, x, y) } }
+            if (hit == null) {
+                cutHint = "That tap missed the model — tap directly on its surface."
+            } else {
+                cutPoints.add(hit)
+                cutHint = when {
+                    cutPoints.size < 3 -> "Keep tapping around the area (${cutPoints.size} point${if (cutPoints.size > 1) "s" else ""})."
+                    else -> "Tap near the first point to close the outline."
+                }
+            }
+            view?.requestRender()
+        }
+    }
+
+    fun connectOutline() {
+        askConnect = false
+        if (cutPoints.size >= 3) createPartOpen = true
+    }
+
+    fun nextCutName(): String = "Cut part ${cutCount + 1}"
+
+    fun createPart(name: String, mode: Int) {
+        if (cutPoints.size < 3) return
+        cutBusy = true
+        val flat = FloatArray(cutPoints.size * 3)
+        cutPoints.forEachIndexed { i, p -> System.arraycopy(p, 0, flat, i * 3, 3) }
+        scope.launch {
+            val r = withContext(Dispatchers.Default) { safe { NativeBridge.nativeCut(handle, flat, mode, name) } } ?: "ERR|Cancelled"
+            cutBusy = false
+            createPartOpen = false
+            if (r.startsWith("ERR|")) {
+                cutHint = r.removePrefix("ERR|")
+                return@launch
+            }
+            val parts = r.split('|')
+            val idx = parts.getOrNull(0)?.toIntOrNull() ?: -1
+            val tris = parts.getOrNull(1)?.toLongOrNull() ?: 0
+            val caps = parts.getOrNull(2)?.toLongOrNull() ?: 0
+            cutCount++
+            cutActive = false
+            cutPoints.clear()
+            cutHint = null
+            hasUndo = true
+            refreshStats()
+            rebuildReport()
+            selectPart(idx)
+            lastCut = "Created \"$name\" · ${com.dronedirector.vertexapro.data.formatCount(tris)} triangles" +
+                if (caps > 0) " · sealed with ${com.dronedirector.vertexapro.data.formatCount(caps)}" else ""
+            view?.requestRender()
+            delay(250)
+            refreshStats()
+        }
+    }
+
+    fun undoLastCut() {
+        scope.launch {
+            val ok = withContext(Dispatchers.Default) { safe { NativeBridge.nativeUndoCut(handle) } } ?: false
+            if (ok) {
+                hasUndo = false
+                lastCut = null
+                selectPart(-1)
+                delay(100)
+                refreshStats()
+            }
+            view?.requestRender()
+        }
+    }
+
+    fun renamePart(i: Int, name: String) {
+        if (name.isBlank()) return
+        safe { NativeBridge.nativeRenamePart(handle, i, name.trim()) }
+        refreshParts()
+    }
+
     // ---------------------------------------------------------------- parts
     fun pick(x: Float, y: Float) {
         safe { NativeBridge.nativeRequestPick(handle, x, y) }
@@ -578,7 +725,7 @@ class ViewerController(
 
     // ---------------------------------------------------------------- export
     fun export(tree: Uri, format: Int, visibleOnly: Boolean) {
-        job = JobState("Saving ${if (format == 0) "OBJ" else "STL"}", 0f)
+        job = JobState("Saving ${if (format == 0) "OBJ" else "STL"}", if (canEdit) 0.5f else 0f)
         val namesByMat = safe { NativeBridge.nativeMaterialTextures(handle) } ?: emptyArray()
         val hidden = BooleanArray((parts.maxOfOrNull { it.index } ?: -1) + 1) { visibleOnly && it in hiddenParts }
         val poll = scope.launch {
@@ -588,10 +735,12 @@ class ViewerController(
                 job = job?.copy(progress = p)
             }
         }
+        val partNames = parts.associate { it.index to it.name }
         scope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
-                    Exporter.export(context, handle, tree, loadSource, resolver, format, hidden, namesByMat, splitLoose)
+                    Exporter.export(context, handle, tree, loadSource, resolver, format, hidden, namesByMat, splitLoose,
+                        fromMemory = canEdit, partNames = partNames)
                 }
             }
             poll.cancel()

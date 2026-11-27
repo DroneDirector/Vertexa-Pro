@@ -267,6 +267,14 @@ void Renderer::clearModel() {
         glDeleteBuffers(3, b);
     }
     gpu_.clear();
+    {
+        std::lock_guard<std::mutex> dl(dataMu_);
+        cpu_.clear();
+        undo_.clear();
+        cpuBytes_ = 0;
+        keepCpu_ = true;
+        rebuildGpu_ = false;
+    }
     std::vector<GLuint> uniq;
     for (auto& t : textures_)
         if (std::find(uniq.begin(), uniq.end(), t.second) == uniq.end()) uniq.push_back(t.second);
@@ -303,6 +311,23 @@ void Renderer::setTexture(int material, int glTex) {
 }
 
 void Renderer::upload(std::unique_ptr<Chunk> c) {
+    uploadGpu(*c);
+    std::lock_guard<std::mutex> l(dataMu_);
+    if (!keepCpu_) return;
+    size_t bytes = c->verts.size() * sizeof(Vertex) + (c->tris.size() + c->lines.size()) * 4;
+    if (cpuBytes_ + bytes > cpuBudget_) {
+        keepCpu_ = false;  // too big to keep a second copy: viewing still works, editing doesn't
+        cpu_.clear();
+        undo_.clear();
+        cpuBytes_ = 0;
+        return;
+    }
+    cpuBytes_ += bytes;
+    cpu_.push_back(std::shared_ptr<Chunk>(c.release()));
+}
+
+void Renderer::uploadGpu(const Chunk& cc) {
+    const Chunk* c = &cc;
     Gpu g;
     g.material = c->material;
     g.part = c->part;
@@ -477,6 +502,20 @@ bool Renderer::draw(Sink* sink, double now) {
     lastTime_ = now;
     bool more = false;
 
+    {
+        std::unique_lock<std::mutex> dl(dataMu_, std::try_to_lock);
+        if (dl.owns_lock() && rebuildGpu_) {
+            for (auto& g : gpu_) {
+                glDeleteVertexArrays(1, &g.vao);
+                GLuint b[3] = {g.vbo, g.ibo, g.lbo};
+                glDeleteBuffers(3, b);
+            }
+            gpu_.clear();
+            for (auto& c : cpu_) uploadGpu(*c);
+            rebuildGpu_ = false;
+            more = true;
+        }
+    }
     if (sink) {
         auto t0 = std::chrono::steady_clock::now();
         int n = 0;

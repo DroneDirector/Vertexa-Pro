@@ -7,6 +7,7 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.outlined.AccountTree
+import androidx.compose.material.icons.outlined.ContentCut
 import androidx.compose.material.icons.outlined.Grain
 import androidx.compose.material.icons.outlined.PhotoCamera
 import androidx.compose.material.icons.outlined.Polyline
@@ -137,6 +138,15 @@ fun ViewerScreen(
         if (tree != null) { panel = Panel.NONE; c.extractArchive(tree) }
     }
     fun toggle(p: Panel) { panel = if (panel == p) Panel.NONE else p }
+    var renaming by remember { mutableStateOf<Int?>(null) }
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    androidx.compose.runtime.LaunchedEffect(c.cutHint, c.cutActive) {
+        val h = c.cutHint
+        if (!c.cutActive && h != null) {
+            android.widget.Toast.makeText(ctx, h, android.widget.Toast.LENGTH_LONG).show()
+            c.cutHint = null
+        }
+    }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     var surface by remember { mutableStateOf<ModelSurfaceView?>(null) }
 
@@ -157,6 +167,7 @@ fun ViewerScreen(
             factory = { ctx -> ModelSurfaceView(ctx, c).also { c.view = it; surface = it } },
             modifier = Modifier.fillMaxSize(),
         )
+        if (c.cutActive) CutOverlay(c, p)
 
         // ---------------- top bar
         Row(
@@ -188,6 +199,10 @@ fun ViewerScreen(
             verticalArrangement = Arrangement.spacedBy(8.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
+            RoundIconButton(Icons.Outlined.ContentCut, p, active = c.cutActive, contentDescription = "Cut tool") {
+                panel = Panel.NONE
+                if (c.cutActive) c.cancelCut() else c.startCut()
+            }
             RoundIconButton(Icons.Outlined.AccountTree, p, active = panel == Panel.PARTS, contentDescription = "Parts") { toggle(Panel.PARTS) }
             RoundIconButton(Icons.Outlined.WbSunny, p, active = panel == Panel.LIGHT, contentDescription = "Lighting") { toggle(Panel.LIGHT) }
             if (c.stats.points > 0) {
@@ -210,8 +225,11 @@ fun ViewerScreen(
             Modifier.align(Alignment.BottomCenter).fillMaxWidth().navigationBarsPadding().padding(bottom = 14.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            AnimatedVisibility(c.selectedPart >= 0, enter = fadeIn() + slideInVertically { it }, exit = fadeOut()) {
-                SelectedPartBar(c, p)
+            AnimatedVisibility(c.lastCut != null, enter = fadeIn() + slideInVertically { it }, exit = fadeOut()) {
+                LastCutBar(c, p)
+            }
+            AnimatedVisibility(c.selectedPart >= 0 && !c.cutActive, enter = fadeIn() + slideInVertically { it }, exit = fadeOut()) {
+                SelectedPartBar(c, p) { renaming = c.selectedPart }
             }
             AnimatedVisibility(c.missing.isNotEmpty(), enter = fadeIn() + slideInVertically { it }, exit = fadeOut()) {
                 MissingBanner(c.missing, p, onLinkFolder) { c.dismissMissing() }
@@ -316,6 +334,12 @@ fun ViewerScreen(
             InfoPanel(c, p, onReport = { showInfo = false; showReport = true }) { showInfo = false }
         }
 
+        // ---------------- cut tool
+        AnimatedVisibility(
+            c.cutActive, enter = fadeIn() + slideInVertically { -it }, exit = fadeOut(),
+            modifier = Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 66.dp),
+        ) { CutToolbar(c, p) }
+
         // ---------------- side panels
         AnimatedVisibility(
             panel != Panel.NONE,
@@ -349,6 +373,13 @@ fun ViewerScreen(
                     onDismiss = { c.dismissJob() },
                 )
             }
+        }
+
+        if (c.askConnect) ConnectPrompt(c, p)
+        if (c.createPartOpen) CreatePartCard(c, p)
+        renaming?.let { idx ->
+            val current = c.parts.firstOrNull { it.index == idx }?.name ?: ""
+            RenameDialog(current, p) { newName -> if (newName != null) c.renamePart(idx, newName); renaming = null }
         }
 
         // ---------------- load report

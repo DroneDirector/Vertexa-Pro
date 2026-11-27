@@ -1,0 +1,789 @@
+// Cut tool: separates the region inside a lasso into a new part, exactly along the lasso.
+//
+// The lasso corners are points on the model's surface. Each pair of neighbouring corners,
+// together with the eye, defines a plane; every triangle crossing a lasso edge is split along
+// that plane, so the cut follows the drawn line exactly whatever the mesh density. Pieces are
+// classified inside / outside by projecting them onto the screen. Depending on the mode the
+// whole inside region (cut through), only the nearest surface (surface) or the nearest wall's
+// outer + inner skin (one wall) becomes the new part. Open cut edges are sealed on both sides.
+#include <unistd.h>
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <unordered_map>
+
+#include "exporter.h"
+#include "renderer.h"
+
+namespace vx {
+
+struct Renderer::CutCam {
+    M4 mvp;
+    double R[9];  // model-view rotation (row-major, view = R * model + t)
+    V3 eye, fwd;
+    double W = 1, H = 1, tanHalf = 1, aspect = 1, radius = 1;
+};
+
+namespace {
+
+const double kFovC = 45.0 * M_PI / 180.0;
+
+inline uint64_t mix64(uint64_t h) {
+    h ^= h >> 33; h *= 0xff51afd7ed558ccdULL; h ^= h >> 33; h *= 0xc4ceb9fe1a85ec53ULL; h ^= h >> 33;
+    return h;
+}
+
+struct PosKey {
+    uint32_t x, y, z;
+    bool operator==(const PosKey& o) const { return x == o.x && y == o.y && z == o.z; }
+};
+struct PosKeyHash {
+    size_t operator()(const PosKey& k) const {
+        return (size_t)mix64(((uint64_t)k.x << 32) ^ ((uint64_t)k.y * 0x9E3779B97F4A7C15ULL) ^ k.z);
+    }
+};
+PosKey keyOf(const float* p) {
+    PosKey k;
+    float q[3] = {p[0] == 0.f ? 0.f : p[0], p[1] == 0.f ? 0.f : p[1], p[2] == 0.f ? 0.f : p[2]};  // -0 == 0
+    memcpy(&k.x, &q[0], 4);
+    memcpy(&k.y, &q[1], 4);
+    memcpy(&k.z, &q[2], 4);
+    return k;
+}
+
+void unpackN(uint32_t n, double out[3]) {
+    for (int i = 0; i < 3; i++) {
+        int v = (int)((n >> (i * 10)) & 0x3FF);
+        if (v & 0x200) v -= 0x400;
+        out[i] = v / 511.0;
+    }
+}
+
+struct CV {
+    Vertex v;
+    int idx;  // index in the chunk's original vertices, or -1 for a new vertex
+    bool onCut;
+};
+
+bool lessPos(const Vertex& a, const Vertex& b) {
+    for (int i = 0; i < 3; i++) {
+        if (a.p[i] < b.p[i]) return true;
+        if (a.p[i] > b.p[i]) return false;
+    }
+    return false;
+}
+
+// Interpolates in a canonical order so the same edge gives a bit-identical point from either side.
+CV lerpCV(const CV& a0, const CV& b0, double t) {
+    const CV* a = &a0;
+    const CV* b = &b0;
+    if (lessPos(b0.v, a0.v)) { std::swap(a, b); t = 1 - t; }
+    CV r;
+    r.idx = -1;
+    r.onCut = true;
+    for (int i = 0; i < 3; i++) r.v.p[i] = (float)(a->v.p[i] + (b->v.p[i] - a->v.p[i]) * t);
+    for (int i = 0; i < 2; i++) r.v.uv[i] = (float)(a->v.uv[i] + (b->v.uv[i] - a->v.uv[i]) * t);
+    double na[3], nb[3];
+    unpackN(a->v.n, na);
+    unpackN(b->v.n, nb);
+    r.v.n = packNormal((float)(na[0] + (nb[0] - na[0]) * t), (float)(na[1] + (nb[1] - na[1]) * t),
+                       (float)(na[2] + (nb[2] - na[2]) * t));
+    uint32_t c = 0;
+    for (int k = 0; k < 4; k++) {
+        double ca = (a->v.c >> (8 * k)) & 255, cb = (b->v.c >> (8 * k)) & 255;
+        c |= ((uint32_t)std::lround(ca + (cb - ca) * t) & 255u) << (8 * k);
+    }
+    r.v.c = c;
+    return r;
+}
+
+struct Plane {
+    V3 n;
+    double d;
+    double dist(const float* p) const { return n.x * p[0] + n.y * p[1] + n.z * p[2] + d; }
+};
+
+void splitPoly(const std::vector<CV>& poly, const Plane& pl, double eps, std::vector<CV>& front, std::vector<CV>& back) {
+    front.clear();
+    back.clear();
+    size_t n = poly.size();
+    std::vector<double> d(n);
+    for (size_t i = 0; i < n; i++) {
+        d[i] = pl.dist(poly[i].v.p);
+        if (std::fabs(d[i]) < eps) d[i] = 0;
+    }
+    for (size_t i = 0; i < n; i++) {
+        const CV& a = poly[i];
+        const CV& b = poly[(i + 1) % n];
+        double da = d[i], db = d[(i + 1) % n];
+        if (da >= 0) front.push_back(a);
+        if (da <= 0) back.push_back(a);
+        if (da == 0) {
+            front.back().onCut = true;
+            back.back().onCut = true;
+        }
+        if ((da > 0 && db < 0) || (da < 0 && db > 0)) {
+            CV m = lerpCV(a, b, da / (da - db));
+            front.push_back(m);
+            back.push_back(m);
+        }
+    }
+    if (front.size() < 3) front.clear();
+    if (back.size() < 3) back.clear();
+}
+
+bool pointInPoly(double x, double y, const std::vector<double>& poly) {
+    bool in = false;
+    size_t n = poly.size() / 2;
+    for (size_t i = 0, j = n - 1; i < n; j = i++) {
+        double xi = poly[i * 2], yi = poly[i * 2 + 1], xj = poly[j * 2], yj = poly[j * 2 + 1];
+        if (((yi > y) != (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi + 1e-300) + xi)) in = !in;
+    }
+    return in;
+}
+
+// Ear clipping of a simple 2D polygon; returns triangles as indices into pts.
+std::vector<int> earClip(const std::vector<double>& xy) {
+    int n = (int)xy.size() / 2;
+    std::vector<int> out, idx(n);
+    if (n < 3) return out;
+    double area = 0;
+    for (int i = 0; i < n; i++) {
+        int j = (i + 1) % n;
+        area += xy[i * 2] * xy[j * 2 + 1] - xy[j * 2] * xy[i * 2 + 1];
+    }
+    for (int i = 0; i < n; i++) idx[i] = area >= 0 ? i : n - 1 - i;
+    auto X = [&](int i) { return xy[i * 2]; };
+    auto Y = [&](int i) { return xy[i * 2 + 1]; };
+    auto cross = [&](int a, int b, int c) { return (X(b) - X(a)) * (Y(c) - Y(a)) - (Y(b) - Y(a)) * (X(c) - X(a)); };
+    int guard = 0;
+    while (idx.size() > 3 && guard < n * n) {
+        guard++;
+        bool clipped = false;
+        int m = (int)idx.size();
+        for (int i = 0; i < m; i++) {
+            int a = idx[(i + m - 1) % m], b = idx[i], c = idx[(i + 1) % m];
+            if (cross(a, b, c) <= 1e-14) continue;  // reflex or degenerate
+            bool inside = false;
+            for (int k = 0; k < m && !inside; k++) {
+                int q = idx[k];
+                if (q == a || q == b || q == c) continue;
+                if (cross(a, b, q) >= 0 && cross(b, c, q) >= 0 && cross(c, a, q) >= 0) inside = true;
+            }
+            if (inside) continue;
+            out.insert(out.end(), {a, b, c});
+            idx.erase(idx.begin() + i);
+            clipped = true;
+            break;
+        }
+        if (!clipped) {
+            // numerically stuck: fan the rest
+            for (size_t k = 1; k + 1 < idx.size(); k++) out.insert(out.end(), {idx[0], idx[k], idx[k + 1]});
+            return out;
+        }
+    }
+    if (idx.size() == 3) out.insert(out.end(), {idx[0], idx[1], idx[2]});
+    return out;
+}
+
+// Turns lists of indexed triangles over a shared vertex array into a compact chunk.
+std::unique_ptr<Chunk> buildChunk(const std::vector<Vertex>& verts, const std::vector<uint32_t>& tris, int material, int part) {
+    if (tris.empty()) return nullptr;
+    auto c = std::make_unique<Chunk>();
+    c->material = material;
+    c->part = part;
+    std::unordered_map<uint32_t, uint32_t> remap;
+    remap.reserve(tris.size());
+    c->tris.reserve(tris.size());
+    for (uint32_t i : tris) {
+        auto it = remap.find(i);
+        uint32_t ni;
+        if (it == remap.end()) {
+            ni = (uint32_t)c->verts.size();
+            remap.emplace(i, ni);
+            c->verts.push_back(verts[i]);
+        } else ni = it->second;
+        c->tris.push_back(ni);
+    }
+    c->lines.reserve(c->tris.size() * 2);
+    for (size_t t = 0; t + 2 < c->tris.size(); t += 3) {
+        uint32_t a = c->tris[t], b = c->tris[t + 1], d = c->tris[t + 2];
+        c->lines.insert(c->lines.end(), {a, b, b, d, d, a});
+    }
+    return c;
+}
+
+}  // namespace
+
+bool Renderer::cutCamera(CutCam& cc) {
+    Frame f;
+    {
+        std::lock_guard<std::mutex> l(mu_);
+        f = frameState();
+    }
+    const Bounds& rb = f.rb;
+    if (!rb.valid()) return false;
+    V3 center((rb.mn[0] + rb.mx[0]) / 2, (rb.mn[1] + rb.mx[1]) / 2, (rb.mn[2] + rb.mx[2]) / 2);
+    double radius = V3(rb.mx[0] - rb.mn[0], rb.mx[1] - rb.mn[1], rb.mx[2] - rb.mn[2]).len() / 2;
+    if (radius <= 0) radius = 1;
+    const Cam& cam = f.cam;
+    V3 dir(std::cos(cam.pitch) * std::sin(cam.yaw), std::sin(cam.pitch), std::cos(cam.pitch) * std::cos(cam.yaw));
+    V3 eyeW = cam.target + dir * cam.dist;
+    M4 view = lookAt(eyeW, cam.target, V3(0, 1, 0));
+    double dc = (eyeW - center).len();
+    double far = dc + radius * 8.4;
+    double nearP = std::max(dc - radius * 1.05, far * 2e-5);
+    M4 proj = perspective(kFovC, (double)w_ / (double)h_, nearP, far);
+    M4 mv = view * (f.upZ ? rotX(-M_PI / 2) : M4::identity());
+    cc.mvp = proj * mv;
+    // column-major mv: R[row][col] = m[col*4+row]
+    for (int r = 0; r < 3; r++)
+        for (int c = 0; c < 3; c++) cc.R[r * 3 + c] = mv.m[c * 4 + r];
+    double t[3] = {mv.m[12], mv.m[13], mv.m[14]};
+    // eye in model space = -R^T t ; forward = R^T (0,0,-1)
+    cc.eye = V3(-(cc.R[0] * t[0] + cc.R[3] * t[1] + cc.R[6] * t[2]), -(cc.R[1] * t[0] + cc.R[4] * t[1] + cc.R[7] * t[2]),
+                -(cc.R[2] * t[0] + cc.R[5] * t[1] + cc.R[8] * t[2]));
+    cc.fwd = V3(-cc.R[6], -cc.R[7], -cc.R[8]).norm();
+    cc.W = w_;
+    cc.H = h_;
+    cc.tanHalf = std::tan(kFovC / 2);
+    cc.aspect = (double)w_ / (double)h_;
+    cc.radius = radius;
+    return true;
+}
+
+static bool projectCC(const Renderer::CutCam& cc, const float* p, double& sx, double& sy) {
+    const double* m = cc.mvp.m;
+    double x = m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12];
+    double y = m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13];
+    double w = m[3] * p[0] + m[7] * p[1] + m[11] * p[2] + m[15];
+    if (w <= 1e-12) return false;
+    sx = (x / w * 0.5 + 0.5) * cc.W;
+    sy = (1.0 - (y / w * 0.5 + 0.5)) * cc.H;
+    return true;
+}
+
+void Renderer::project(const float* in, int n, float* out) {
+    CutCam cc;
+    if (!cutCamera(cc)) {
+        for (int i = 0; i < n * 2; i++) out[i] = NAN;
+        return;
+    }
+    for (int i = 0; i < n; i++) {
+        double sx, sy;
+        if (projectCC(cc, in + i * 3, sx, sy)) { out[i * 2] = (float)sx; out[i * 2 + 1] = (float)sy; }
+        else { out[i * 2] = NAN; out[i * 2 + 1] = NAN; }
+    }
+}
+
+bool Renderer::raycast(float sx, float sy, float outP[3]) {
+    CutCam cc;
+    if (!cutCamera(cc)) return false;
+    double ndcX = 2.0 * sx / cc.W - 1.0, ndcY = 1.0 - 2.0 * sy / cc.H;
+    double dv[3] = {ndcX * cc.tanHalf * cc.aspect, ndcY * cc.tanHalf, -1.0};
+    V3 d(cc.R[0] * dv[0] + cc.R[3] * dv[1] + cc.R[6] * dv[2], cc.R[1] * dv[0] + cc.R[4] * dv[1] + cc.R[7] * dv[2],
+         cc.R[2] * dv[0] + cc.R[5] * dv[1] + cc.R[8] * dv[2]);
+    d = d.norm();
+    std::vector<uint8_t> hidden;
+    {
+        std::lock_guard<std::mutex> l(mu_);
+        hidden = hidden_;
+    }
+    std::lock_guard<std::mutex> dl(dataMu_);
+    double best = 1e300;
+    const V3 o = cc.eye;
+    for (auto& cp : cpu_) {
+        const Chunk& c = *cp;
+        if (c.points) continue;
+        if (c.part >= 0 && c.part < (int)hidden.size() && hidden[c.part]) continue;
+        for (size_t t = 0; t + 2 < c.tris.size(); t += 3) {
+            const float* a = c.verts[c.tris[t]].p;
+            const float* b = c.verts[c.tris[t + 1]].p;
+            const float* e = c.verts[c.tris[t + 2]].p;
+            V3 A(a[0], a[1], a[2]);
+            V3 e1 = V3(b[0], b[1], b[2]) - A, e2 = V3(e[0], e[1], e[2]) - A;
+            V3 p = d.cross(e2);
+            double det = e1.dot(p);
+            if (std::fabs(det) < 1e-20) continue;
+            double inv = 1.0 / det;
+            V3 s = o - A;
+            double u = s.dot(p) * inv;
+            if (u < 0 || u > 1) continue;
+            V3 q = s.cross(e1);
+            double v = d.dot(q) * inv;
+            if (v < 0 || u + v > 1) continue;
+            double tt = e2.dot(q) * inv;
+            if (tt > 0 && tt < best) best = tt;
+        }
+    }
+    if (best >= 1e299) return false;
+    V3 hit = o + d * best;
+    outP[0] = (float)hit.x;
+    outP[1] = (float)hit.y;
+    outP[2] = (float)hit.z;
+    return true;
+}
+
+void Renderer::recomputeParts(Sink* sink) {
+    if (!sink) return;
+    std::vector<PartInfo> stats(sink->parts().size());
+    for (auto& cp : cpu_) {
+        const Chunk& c = *cp;
+        if (c.part < 0) continue;
+        if (c.part >= (int)stats.size()) stats.resize(c.part + 1);
+        PartInfo& pi = stats[c.part];
+        pi.triangles += (int64_t)c.tris.size() / 3;
+        pi.vertices += (int64_t)c.verts.size();
+        for (auto& v : c.verts) pi.bounds.add(v.p);
+    }
+    sink->setPartStats(stats);
+}
+
+Renderer::CutResult Renderer::cut(const CutRequest& req, Sink* sink) {
+    CutResult res;
+    if (!sink) { res.error = "No model loaded."; return res; }
+    size_t n = req.points.size() / 3;
+    if (n < 3) { res.error = "Place at least 3 points."; return res; }
+    CutCam cc;
+    if (!cutCamera(cc)) { res.error = "No model loaded."; return res; }
+
+    // lasso on screen + cutting planes through the eye
+    std::vector<double> lasso(n * 2);
+    for (size_t i = 0; i < n; i++) {
+        double sx, sy;
+        if (!projectCC(cc, &req.points[i * 3], sx, sy)) {
+            res.error = "Some points are behind the camera. Turn the view so every point is visible, then try again.";
+            return res;
+        }
+        lasso[i * 2] = sx;
+        lasso[i * 2 + 1] = sy;
+    }
+    std::vector<Plane> planes(n);
+    std::vector<double> segBox(n * 4);
+    double lminx = 1e300, lminy = 1e300, lmaxx = -1e300, lmaxy = -1e300;
+    std::vector<double> cum(n + 1, 0.0);
+    for (size_t i = 0; i < n; i++) {
+        size_t j = (i + 1) % n;
+        V3 a(req.points[i * 3] - cc.eye.x, req.points[i * 3 + 1] - cc.eye.y, req.points[i * 3 + 2] - cc.eye.z);
+        V3 b(req.points[j * 3] - cc.eye.x, req.points[j * 3 + 1] - cc.eye.y, req.points[j * 3 + 2] - cc.eye.z);
+        V3 nn = a.cross(b).norm();
+        planes[i].n = nn;
+        planes[i].d = -nn.dot(cc.eye);
+        segBox[i * 4] = std::min(lasso[i * 2], lasso[j * 2]);
+        segBox[i * 4 + 1] = std::min(lasso[i * 2 + 1], lasso[j * 2 + 1]);
+        segBox[i * 4 + 2] = std::max(lasso[i * 2], lasso[j * 2]);
+        segBox[i * 4 + 3] = std::max(lasso[i * 2 + 1], lasso[j * 2 + 1]);
+        lminx = std::min(lminx, lasso[i * 2]); lmaxx = std::max(lmaxx, lasso[i * 2]);
+        lminy = std::min(lminy, lasso[i * 2 + 1]); lmaxy = std::max(lmaxy, lasso[i * 2 + 1]);
+        cum[i + 1] = cum[i] + std::hypot(lasso[j * 2] - lasso[i * 2], lasso[j * 2 + 1] - lasso[i * 2 + 1]);
+    }
+    const double perimeter = std::max(cum[n], 1e-9);
+    const double eps = cc.radius * 1e-7;
+
+    std::vector<uint8_t> hidden;
+    {
+        std::lock_guard<std::mutex> l(mu_);
+        hidden = hidden_;
+    }
+    int newPart = sink->addPart(req.name.empty() ? "Cut part" : req.name);
+
+    std::lock_guard<std::mutex> dl(dataMu_);
+    if (!keepCpu_ || cpu_.empty()) {
+        res.error = "This model is too large to edit on this device.";
+        return res;
+    }
+
+    struct Work {
+        std::shared_ptr<Chunk> src;
+        std::vector<Vertex> verts;      // original + new vertices
+        std::vector<uint8_t> onCut;
+        std::vector<uint32_t> keep, cut;
+    };
+    std::vector<Work> works;
+    std::vector<std::shared_ptr<Chunk>> untouched;
+
+    std::vector<CV> poly, front, back;
+    std::vector<std::vector<CV>> polys, next;
+    for (auto& cp : cpu_) {
+        const Chunk& c = *cp;
+        bool skip = c.points || c.tris.empty() || (c.part >= 0 && c.part < (int)hidden.size() && hidden[c.part]);
+        if (!skip) {
+            // quick reject: chunk entirely outside the lasso box
+            double cminx = 1e300, cminy = 1e300, cmaxx = -1e300, cmaxy = -1e300;
+            bool behind = false;
+            for (auto& v : c.verts) {
+                double sx, sy;
+                if (!projectCC(cc, v.p, sx, sy)) { behind = true; break; }
+                cminx = std::min(cminx, sx); cmaxx = std::max(cmaxx, sx);
+                cminy = std::min(cminy, sy); cmaxy = std::max(cmaxy, sy);
+            }
+            if (!behind && (cmaxx < lminx || cminx > lmaxx || cmaxy < lminy || cminy > lmaxy)) skip = true;
+        }
+        if (skip) { untouched.push_back(cp); continue; }
+
+        Work w;
+        w.src = cp;
+        w.verts = c.verts;
+        w.onCut.assign(c.verts.size(), 0);
+        std::vector<double> sxy(c.verts.size() * 2);
+        std::vector<uint8_t> ok(c.verts.size());
+        for (size_t i = 0; i < c.verts.size(); i++) ok[i] = projectCC(cc, c.verts[i].p, sxy[i * 2], sxy[i * 2 + 1]);
+        std::unordered_map<uint64_t, uint32_t> newIdx;
+        auto addVert = [&](const CV& v) -> uint32_t {
+            if (v.idx >= 0) {
+                if (v.onCut) w.onCut[v.idx] = 1;
+                return (uint32_t)v.idx;
+            }
+            uint64_t h = 1469598103934665603ULL;
+            const unsigned char* b = (const unsigned char*)&v.v;
+            for (size_t k = 0; k < sizeof(Vertex); k++) { h ^= b[k]; h *= 1099511628211ULL; }
+            auto it = newIdx.find(h);
+            if (it != newIdx.end()) return it->second;
+            uint32_t id = (uint32_t)w.verts.size();
+            w.verts.push_back(v.v);
+            w.onCut.push_back(1);
+            newIdx.emplace(h, id);
+            return id;
+        };
+        for (size_t t = 0; t + 2 < c.tris.size(); t += 3) {
+            uint32_t ia = c.tris[t], ib = c.tris[t + 1], ic = c.tris[t + 2];
+            if (!ok[ia] || !ok[ib] || !ok[ic]) { w.keep.insert(w.keep.end(), {ia, ib, ic}); continue; }
+            double tminx = std::min({sxy[ia * 2], sxy[ib * 2], sxy[ic * 2]});
+            double tmaxx = std::max({sxy[ia * 2], sxy[ib * 2], sxy[ic * 2]});
+            double tminy = std::min({sxy[ia * 2 + 1], sxy[ib * 2 + 1], sxy[ic * 2 + 1]});
+            double tmaxy = std::max({sxy[ia * 2 + 1], sxy[ib * 2 + 1], sxy[ic * 2 + 1]});
+            if (tmaxx < lminx || tminx > lmaxx || tmaxy < lminy || tminy > lmaxy) {
+                w.keep.insert(w.keep.end(), {ia, ib, ic});
+                continue;
+            }
+            polys.clear();
+            poly = {CV{c.verts[ia], (int)ia, false}, CV{c.verts[ib], (int)ib, false}, CV{c.verts[ic], (int)ic, false}};
+            polys.push_back(poly);
+            for (size_t e = 0; e < n; e++) {
+                if (segBox[e * 4 + 2] < tminx || segBox[e * 4] > tmaxx || segBox[e * 4 + 3] < tminy || segBox[e * 4 + 1] > tmaxy) continue;
+                next.clear();
+                for (auto& pp : polys) {
+                    splitPoly(pp, planes[e], eps, front, back);
+                    if (!front.empty()) next.push_back(front);
+                    if (!back.empty()) next.push_back(back);
+                }
+                polys.swap(next);
+            }
+            for (auto& pp : polys) {
+                double cx = 0, cy = 0, cz = 0;
+                for (auto& v : pp) { cx += v.v.p[0]; cy += v.v.p[1]; cz += v.v.p[2]; }
+                float cen[3] = {(float)(cx / pp.size()), (float)(cy / pp.size()), (float)(cz / pp.size())};
+                double px, py;
+                bool inside = projectCC(cc, cen, px, py) && pointInPoly(px, py, lasso);
+                std::vector<uint32_t>& dst = inside ? w.cut : w.keep;
+                uint32_t i0 = addVert(pp[0]);
+                for (size_t k = 1; k + 1 < pp.size(); k++) {
+                    uint32_t i1 = addVert(pp[k]), i2 = addVert(pp[k + 1]);
+                    dst.insert(dst.end(), {i0, i1, i2});
+                }
+            }
+        }
+        if (w.cut.empty()) { untouched.push_back(cp); continue; }
+        works.push_back(std::move(w));
+    }
+    if (works.empty()) {
+        res.error = "Nothing of the model is inside the outline.";
+        return res;
+    }
+
+    // ---- welded positions across all touched chunks
+    std::unordered_map<PosKey, uint32_t, PosKeyHash> posId;
+    std::vector<V3> posOf;
+    auto pid = [&](const float* p) {
+        auto k = keyOf(p);
+        auto it = posId.find(k);
+        if (it != posId.end()) return it->second;
+        uint32_t id = (uint32_t)posOf.size();
+        posId.emplace(k, id);
+        posOf.emplace_back(p[0], p[1], p[2]);
+        return id;
+    };
+
+    // ---- surface / one wall: keep only the nearest connected layer(s) inside the outline
+    if (req.mode != 0) {
+        struct T { uint32_t w, t; };
+        std::vector<T> tris;
+        for (uint32_t wi = 0; wi < works.size(); wi++)
+            for (uint32_t t = 0; t + 2 < works[wi].cut.size(); t += 3) tris.push_back({wi, t});
+        std::vector<uint32_t> parent(tris.size());
+        for (size_t i = 0; i < parent.size(); i++) parent[i] = (uint32_t)i;
+        auto find = [&](uint32_t x) {
+            while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+            return x;
+        };
+        std::unordered_map<uint32_t, uint32_t> firstTri;  // position id -> a triangle using it
+        for (uint32_t i = 0; i < tris.size(); i++) {
+            const Work& w = works[tris[i].w];
+            for (int k = 0; k < 3; k++) {
+                uint32_t p = pid(w.verts[w.cut[tris[i].t + k]].p);
+                auto it = firstTri.find(p);
+                if (it == firstTri.end()) firstTri.emplace(p, i);
+                else {
+                    uint32_t a = find(it->second), b = find(i);
+                    if (a != b) parent[b] = a;
+                }
+            }
+        }
+        std::unordered_map<uint32_t, std::pair<double, int64_t>> comp;  // root -> (depth sum, count)
+        for (uint32_t i = 0; i < tris.size(); i++) {
+            const Work& w = works[tris[i].w];
+            double dsum = 0;
+            for (int k = 0; k < 3; k++) {
+                const float* p = w.verts[w.cut[tris[i].t + k]].p;
+                dsum += (V3(p[0], p[1], p[2]) - cc.eye).dot(cc.fwd);
+            }
+            auto& e = comp[find(i)];
+            e.first += dsum / 3;
+            e.second++;
+        }
+        std::vector<std::pair<double, uint32_t>> order;  // mean depth, root
+        for (auto& kv : comp) {
+            if (kv.second.second < 2 && comp.size() > 1) continue;  // ignore specks
+            order.push_back({kv.second.first / kv.second.second, kv.first});
+        }
+        std::sort(order.begin(), order.end());
+        std::unordered_map<uint32_t, bool> chosen;
+        if (!order.empty()) chosen[order[0].second] = true;
+        if (req.mode == 2 && order.size() > 1 && order[1].first - order[0].first < cc.radius * 0.12)
+            chosen[order[1].second] = true;
+        std::vector<std::vector<uint32_t>> newCut(works.size());
+        for (uint32_t i = 0; i < tris.size(); i++) {
+            Work& w = works[tris[i].w];
+            const uint32_t* tr = &w.cut[tris[i].t];
+            if (chosen.count(find(i))) newCut[tris[i].w].insert(newCut[tris[i].w].end(), tr, tr + 3);
+            else w.keep.insert(w.keep.end(), tr, tr + 3);
+        }
+        for (size_t wi = 0; wi < works.size(); wi++) works[wi].cut.swap(newCut[wi]);
+    }
+
+    // ---- seal: find open cut edges of the new part and cap them
+    std::unordered_map<uint64_t, int> edgeCount;
+    std::unordered_map<uint64_t, uint8_t> edgeOnCut;
+    for (auto& w : works) {
+        for (size_t t = 0; t + 2 < w.cut.size(); t += 3) {
+            for (int k = 0; k < 3; k++) {
+                uint32_t a = w.cut[t + k], b = w.cut[t + (k + 1) % 3];
+                uint32_t pa = pid(w.verts[a].p), pb = pid(w.verts[b].p);
+                if (pa == pb) continue;
+                uint64_t key = pa < pb ? ((uint64_t)pa << 32 | pb) : ((uint64_t)pb << 32 | pa);
+                edgeCount[key]++;
+                if (w.onCut[a] && w.onCut[b]) edgeOnCut[key] = 1;
+            }
+        }
+    }
+    std::unordered_map<uint32_t, std::vector<uint32_t>> adj;
+    for (auto& kv : edgeCount) {
+        if (kv.second != 1 || !edgeOnCut.count(kv.first)) continue;
+        uint32_t a = (uint32_t)(kv.first >> 32), b = (uint32_t)(kv.first & 0xFFFFFFFF);
+        adj[a].push_back(b);
+        adj[b].push_back(a);
+    }
+    std::vector<std::vector<uint32_t>> loops;
+    {
+        std::unordered_map<uint64_t, bool> used;
+        auto ek = [](uint32_t a, uint32_t b) { return a < b ? ((uint64_t)a << 32 | b) : ((uint64_t)b << 32 | a); };
+        for (auto& kv : adj) {
+            for (uint32_t nb : kv.second) {
+                if (used[ek(kv.first, nb)]) continue;
+                std::vector<uint32_t> loop{kv.first};
+                uint32_t prev = kv.first, cur = nb;
+                used[ek(prev, cur)] = true;
+                int guard = 0;
+                while (cur != kv.first && guard++ < 2000000) {
+                    loop.push_back(cur);
+                    uint32_t nxt = UINT32_MAX;
+                    for (uint32_t c2 : adj[cur]) {
+                        if (!used[ek(cur, c2)]) { nxt = c2; break; }
+                    }
+                    if (nxt == UINT32_MAX) break;
+                    used[ek(cur, nxt)] = true;
+                    prev = cur;
+                    cur = nxt;
+                }
+                if (cur == kv.first && loop.size() >= 3) loops.push_back(std::move(loop));
+            }
+        }
+    }
+
+    // loop vertices in (position along the outline, depth) space
+    auto uvOf = [&](const V3& p, double& u, double& dep) {
+        float fp[3] = {(float)p.x, (float)p.y, (float)p.z};
+        double sx = 0, sy = 0;
+        projectCC(cc, fp, sx, sy);
+        double best = 1e300;
+        u = 0;
+        for (size_t i = 0; i < n; i++) {
+            size_t j = (i + 1) % n;
+            double ax = lasso[i * 2], ay = lasso[i * 2 + 1], bx = lasso[j * 2] - ax, by = lasso[j * 2 + 1] - ay;
+            double L2 = bx * bx + by * by;
+            double t = L2 > 0 ? std::clamp(((sx - ax) * bx + (sy - ay) * by) / L2, 0.0, 1.0) : 0.0;
+            double dx = sx - (ax + bx * t), dy = sy - (ay + by * t);
+            double d2 = dx * dx + dy * dy;
+            if (d2 < best) { best = d2; u = cum[i] + t * (cum[i + 1] - cum[i]); }
+        }
+        dep = (p - cc.eye).dot(cc.fwd);
+    };
+    std::vector<std::array<V3, 3>> caps;
+    struct LoopInfo { std::vector<double> u, d; double meanD; bool wrapped; };
+    std::vector<LoopInfo> infos(loops.size());
+    double dmin = 1e300, dmax = -1e300;
+    for (size_t li = 0; li < loops.size(); li++) {
+        LoopInfo& L = infos[li];
+        double wind = 0, dsum = 0;
+        for (size_t k = 0; k < loops[li].size(); k++) {
+            double u, d;
+            uvOf(posOf[loops[li][k]], u, d);
+            L.u.push_back(u);
+            L.d.push_back(d);
+            dsum += d;
+            dmin = std::min(dmin, d);
+            dmax = std::max(dmax, d);
+            if (k > 0) {
+                double du = u - L.u[k - 1];
+                if (du > perimeter / 2) du -= perimeter;
+                if (du < -perimeter / 2) du += perimeter;
+                wind += du;
+            }
+        }
+        double du = L.u[0] - L.u.back();
+        if (du > perimeter / 2) du -= perimeter;
+        if (du < -perimeter / 2) du += perimeter;
+        wind += du;
+        L.meanD = dsum / loops[li].size();
+        L.wrapped = std::fabs(wind) > perimeter * 0.5;
+        if (wind < 0) {  // make every loop run forward along the outline
+            std::reverse(loops[li].begin(), loops[li].end());
+            std::reverse(L.u.begin(), L.u.end());
+            std::reverse(L.d.begin(), L.d.end());
+        }
+    }
+    double dscale = std::max(dmax - dmin, 1e-9);
+    std::vector<size_t> wrapped;
+    for (size_t li = 0; li < loops.size(); li++) {
+        if (loops[li].size() > 20000) continue;
+        if (infos[li].wrapped) { wrapped.push_back(li); continue; }
+        std::vector<double> xy;
+        for (size_t k = 0; k < loops[li].size(); k++) {
+            xy.push_back(infos[li].u[k] / perimeter);
+            xy.push_back((infos[li].d[k] - dmin) / dscale);
+        }
+        auto tri = earClip(xy);
+        for (size_t t = 0; t + 2 < tri.size(); t += 3)
+            caps.push_back({posOf[loops[li][tri[t]]], posOf[loops[li][tri[t + 1]]], posOf[loops[li][tri[t + 2]]]});
+    }
+    // loops that go all the way round the outline are paired by depth and joined as a band
+    std::sort(wrapped.begin(), wrapped.end(), [&](size_t a, size_t b) { return infos[a].meanD < infos[b].meanD; });
+    for (size_t k = 0; k + 1 < wrapped.size(); k += 2) {
+        auto& A = loops[wrapped[k]];
+        auto& B = loops[wrapped[k + 1]];
+        auto unwrap = [&](const std::vector<double>& u, std::vector<double>& out, size_t& start) {
+            start = (size_t)(std::min_element(u.begin(), u.end()) - u.begin());
+            out.resize(u.size() + 1);
+            double base = u[start];
+            for (size_t i = 0; i <= u.size(); i++) {
+                double v = u[(start + i) % u.size()] - base;
+                while (v < 0) v += perimeter;
+                if (i > 0 && v + 1e-9 < out[i - 1]) v = out[i - 1];
+                out[i] = (i == u.size()) ? perimeter : v;
+            }
+        };
+        std::vector<double> ua, ub;
+        size_t sa, sb;
+        unwrap(infos[wrapped[k]].u, ua, sa);
+        unwrap(infos[wrapped[k + 1]].u, ub, sb);
+        size_t m = A.size(), q = B.size(), i = 0, j = 0;
+        auto pa = [&](size_t x) { return posOf[A[(sa + x) % m]]; };
+        auto pb = [&](size_t x) { return posOf[B[(sb + x) % q]]; };
+        while (i < m || j < q) {
+            bool advanceA = j >= q || (i < m && ua[i + 1] <= ub[j + 1]);
+            if (advanceA) { caps.push_back({pa(i), pa(i + 1), pb(j)}); i++; }
+            else { caps.push_back({pa(i), pb(j + 1), pb(j)}); j++; }
+        }
+    }
+
+    // ---- write back: rebuilt chunks + caps, previous geometry kept for undo
+    std::vector<std::shared_ptr<Chunk>> result = untouched;
+    int64_t cutTris = 0;
+    int keepPartForCaps = works[0].src->part;
+    for (auto& w : works) {
+        const Chunk& src = *w.src;
+        if (auto k = buildChunk(w.verts, w.keep, src.material, src.part)) result.push_back(std::shared_ptr<Chunk>(k.release()));
+        cutTris += (int64_t)w.cut.size() / 3;
+        if (auto c = buildChunk(w.verts, w.cut, src.material, newPart)) result.push_back(std::shared_ptr<Chunk>(c.release()));
+    }
+    if (!caps.empty()) {
+        // the same seal goes on the new part and on the opening left in the model (facing the other way)
+        for (int side = 0; side < 2; side++) {
+            std::vector<Vertex> cv;
+            std::vector<uint32_t> ct;
+            for (auto& tri : caps) {
+                V3 e1 = tri[1] - tri[0], e2 = tri[2] - tri[0];
+                V3 nn = e1.cross(e2);
+                if (nn.len() <= 0) continue;
+                if (side == 1) nn = nn * -1.0;
+                uint32_t pn = packNormal((float)nn.x, (float)nn.y, (float)nn.z);
+                for (int kk = 0; kk < 3; kk++) {
+                    const V3& p = tri[side == 1 ? 2 - kk : kk];
+                    Vertex v;
+                    v.p[0] = (float)p.x; v.p[1] = (float)p.y; v.p[2] = (float)p.z;
+                    v.n = pn;
+                    v.uv[0] = v.uv[1] = 0;
+                    v.c = kWhite;
+                    ct.push_back((uint32_t)cv.size());
+                    cv.push_back(v);
+                }
+            }
+            if (auto c = buildChunk(cv, ct, -1, side == 0 ? newPart : keepPartForCaps))
+                result.push_back(std::shared_ptr<Chunk>(c.release()));
+        }
+    }
+    undo_ = cpu_;
+    cpu_.swap(result);
+    rebuildGpu_ = true;
+    recomputeParts(sink);
+    res.part = newPart;
+    res.triangles = cutTris;
+    res.capTriangles = (int64_t)caps.size();
+    sink->log(0, "Cut \"" + req.name + "\": " + std::to_string(cutTris) + " triangles moved to the new part, " +
+                     std::to_string(caps.size()) + " triangles added to seal the cut.");
+    return res;
+}
+
+bool Renderer::undoCut(Sink* sink) {
+    std::lock_guard<std::mutex> dl(dataMu_);
+    if (undo_.empty()) return false;
+    cpu_.swap(undo_);
+    undo_.clear();
+    rebuildGpu_ = true;
+    recomputeParts(sink);
+    return true;
+}
+
+std::string Renderer::exportMemory(const ExportOptions& opt, Sink* sink) {
+    ChunkWriter w(opt);
+    if (!w.begin()) {
+        if (opt.mtlFd >= 0) ::close(opt.mtlFd);
+        return "Could not write the output file.";
+    }
+    std::vector<PartInfo> parts = sink ? sink->parts() : std::vector<PartInfo>();
+    std::vector<Material> mats = sink ? sink->materials() : std::vector<Material>();
+    double origin[3] = {0, 0, 0};
+    if (sink) memcpy(origin, sink->origin, sizeof origin);
+    {
+        std::lock_guard<std::mutex> dl(dataMu_);
+        if (!keepCpu_) {
+            w.finish(mats, false);
+            return "no-memory-copy";
+        }
+        for (auto& c : cpu_) w.write(*c, origin, parts, mats);
+    }
+    return w.finish(mats, true);
+}
+
+}  // namespace vx
