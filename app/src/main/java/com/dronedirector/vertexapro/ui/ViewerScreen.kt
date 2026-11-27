@@ -8,6 +8,7 @@ import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.outlined.AccountTree
 import androidx.compose.material.icons.outlined.ContentCut
+import androidx.compose.material.icons.outlined.Straighten
 import androidx.compose.material.icons.outlined.Grain
 import androidx.compose.material.icons.outlined.PhotoCamera
 import androidx.compose.material.icons.outlined.Polyline
@@ -168,6 +169,7 @@ fun ViewerScreen(
             modifier = Modifier.fillMaxSize(),
         )
         if (c.cutActive) CutOverlay(c, p)
+        if (c.measureActive) MeasureOverlay(c, p)
 
         // ---------------- top bar
         Row(
@@ -202,6 +204,10 @@ fun ViewerScreen(
             RoundIconButton(Icons.Outlined.ContentCut, p, active = c.cutActive, contentDescription = "Cut tool") {
                 panel = Panel.NONE
                 if (c.cutActive) c.cancelCut() else c.startCut()
+            }
+            RoundIconButton(Icons.Outlined.Straighten, p, active = c.measureActive, contentDescription = "Measure") {
+                panel = Panel.NONE
+                c.toggleMeasure()
             }
             RoundIconButton(Icons.Outlined.AccountTree, p, active = panel == Panel.PARTS, contentDescription = "Parts") { toggle(Panel.PARTS) }
             RoundIconButton(Icons.Outlined.WbSunny, p, active = panel == Panel.LIGHT, contentDescription = "Lighting") { toggle(Panel.LIGHT) }
@@ -339,6 +345,10 @@ fun ViewerScreen(
             c.cutActive, enter = fadeIn() + slideInVertically { -it }, exit = fadeOut(),
             modifier = Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 66.dp),
         ) { CutToolbar(c, p) }
+        AnimatedVisibility(
+            c.measureActive, enter = fadeIn() + slideInVertically { -it }, exit = fadeOut(),
+            modifier = Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 66.dp),
+        ) { MeasureToolbar(c, p) }
 
         // ---------------- side panels
         AnimatedVisibility(

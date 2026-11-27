@@ -153,6 +153,13 @@ class ViewerController(
         private set
     private var cutCount = 0
 
+    // measure tool
+    var measureActive by mutableStateOf(false)
+        private set
+    val measurePoints = androidx.compose.runtime.mutableStateListOf<FloatArray>()
+    /** 0 m, 1 cm, 2 mm, 3 in, 4 ft — what one model unit means. */
+    var unit by mutableIntStateOf(0)
+
     // snapshot / video / export
     var job by mutableStateOf<JobState?>(null)
     val isArchive get() = loadSource.uri != source.uri
@@ -466,11 +473,67 @@ class ViewerController(
 
     // ---------------------------------------------------------------- cut tool
     fun onTap(x: Float, y: Float) {
-        if (cutActive) addCutPoint(x, y) else pick(x, y)
+        when {
+            cutActive -> addCutPoint(x, y)
+            measureActive -> addMeasurePoint(x, y)
+            else -> pick(x, y)
+        }
+    }
+
+    // ---------------------------------------------------------------- measure tool
+    fun toggleMeasure() {
+        if (measureActive) {
+            measureActive = false
+            measurePoints.clear()
+        } else {
+            if (cutActive) cancelCut()
+            if (!canEdit) { cutHint = "This model is too large to measure on this device."; return }
+            measureActive = true
+            measurePoints.clear()
+            selectPart(-1)
+        }
+        view?.requestRender()
+    }
+
+    private fun addMeasurePoint(x: Float, y: Float) {
+        scope.launch {
+            val hit = withContext(Dispatchers.Default) { safe { NativeBridge.nativeRaycast(handle, x, y) } } ?: return@launch
+            if (measurePoints.size >= 2) measurePoints.clear()
+            measurePoints.add(hit)
+        }
+    }
+
+    fun projectMeasurePoints(): FloatArray {
+        if (measurePoints.isEmpty()) return FloatArray(0)
+        val flat = FloatArray(measurePoints.size * 3)
+        measurePoints.forEachIndexed { i, p -> System.arraycopy(p, 0, flat, i * 3, 3) }
+        return safe { NativeBridge.nativeProject(handle, flat) } ?: FloatArray(0)
+    }
+
+    /** Distance between the two measure points and per-axis differences, in model units. */
+    fun measureDelta(): DoubleArray? {
+        if (measurePoints.size < 2) return null
+        val a = measurePoints[0]
+        val b = measurePoints[1]
+        val dx = (b[0] - a[0]).toDouble()
+        val dy = (b[1] - a[1]).toDouble()
+        val dz = (b[2] - a[2]).toDouble()
+        return doubleArrayOf(kotlin.math.sqrt(dx * dx + dy * dy + dz * dz), kotlin.math.abs(dx), kotlin.math.abs(dy), kotlin.math.abs(dz))
+    }
+
+    fun formatLength(units: Double): String {
+        val meters = units * when (unit) { 0 -> 1.0; 1 -> 0.01; 2 -> 0.001; 3 -> 0.0254; else -> 0.3048 }
+        return when {
+            meters >= 1000 -> String.format(java.util.Locale.US, "%.2f km", meters / 1000)
+            meters >= 1 -> String.format(java.util.Locale.US, "%.3f m", meters)
+            meters >= 0.01 -> String.format(java.util.Locale.US, "%.2f cm", meters * 100)
+            else -> String.format(java.util.Locale.US, "%.2f mm", meters * 1000)
+        } + if (unit >= 3) String.format(java.util.Locale.US, " (%.2f in)", meters / 0.0254) else ""
     }
 
     fun startCut() {
         if (!canEdit) { cutHint = "This model is too large to edit on this device."; return }
+        if (measureActive) toggleMeasure()
         cutActive = true
         cutPoints.clear()
         askConnect = false
