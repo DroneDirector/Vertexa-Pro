@@ -107,7 +107,7 @@ fun PartsPanel(c: ViewerController, p: Palette, onClose: () -> Unit) {
     PanelShell("Parts", "${c.parts.size} part${if (c.parts.size == 1) "" else "s"} · tap a part in the view to select it", p, onClose) {
         SwitchRow(
             "Split into loose parts",
-            if (c.canSplit) "Every piece that isn't joined to the rest becomes its own part (reloads the model)"
+            if (c.canSplit) "Every piece that isn't joined to the rest becomes its own part. Turns on by itself for single-mesh models"
             else "Available for OBJ models",
             c.splitLoose, c.canSplit, p,
         ) { c.updateSplit(it) }

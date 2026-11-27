@@ -1,5 +1,9 @@
 # Changelog
 
+## Next
+
+- Opening the Parts panel on a model that is one single mesh splits it into its loose pieces automatically
+
 ## Cut tool, measure, animation and saved views
 
 - Cut tool (scissors on the right): tap points on the model around an area; near the start point you're asked whether to connect the last point with the first. Then "Create separate part" — the new part stays exactly in place

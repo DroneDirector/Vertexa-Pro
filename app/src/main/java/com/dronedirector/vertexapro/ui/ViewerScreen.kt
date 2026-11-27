@@ -210,7 +210,11 @@ fun ViewerScreen(
                 panel = Panel.NONE
                 c.toggleMeasure()
             }
-            RoundIconButton(Icons.Outlined.AccountTree, p, active = panel == Panel.PARTS, contentDescription = "Parts") { toggle(Panel.PARTS) }
+            RoundIconButton(Icons.Outlined.AccountTree, p, active = panel == Panel.PARTS, contentDescription = "Parts") {
+                toggle(Panel.PARTS)
+                // a model that is one single mesh is split into its loose pieces automatically
+                if (panel == Panel.PARTS && c.parts.size <= 1 && c.canSplit && !c.splitLoose && !c.hasUndo) c.updateSplit(true)
+            }
             RoundIconButton(Icons.Outlined.WbSunny, p, active = panel == Panel.LIGHT, contentDescription = "Lighting") { toggle(Panel.LIGHT) }
             if (c.stats.points > 0) {
                 RoundIconButton(Icons.Outlined.Grain, p, active = panel == Panel.POINTS, contentDescription = "Point cloud") { toggle(Panel.POINTS) }
