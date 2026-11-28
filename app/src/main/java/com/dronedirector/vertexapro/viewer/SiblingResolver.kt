@@ -92,7 +92,14 @@ class SiblingResolver(
         byPath[lower]?.let { return it }
         byPath.entries.firstOrNull { it.key.endsWith("/$lower") }?.let { return it.value }
         val base = lower.substringAfterLast('/')
-        return byName[base]
+        byName[base]?.let { return it }
+        // names shortened when an archive was unpacked (very long Meshy names): same start, same extension
+        val ext = base.substringAfterLast('.', "")
+        val stem = base.substringBeforeLast('.').take(ModelPrep.KEEP_CHARS)
+        byName.entries.firstOrNull { it.key.substringAfterLast('.', "") == ext && it.key.startsWith(stem) }?.let { return it.value }
+        // only one file of that kind next to the model (e.g. a single .mtl): that's the one
+        if (ext == "mtl") byName.entries.filter { it.key.endsWith(".mtl") }.singleOrNull()?.let { return it.value }
+        return null
     }
 
     /** Called from native code. Returns a detached fd owned by the caller, or -1. */

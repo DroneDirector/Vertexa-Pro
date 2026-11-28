@@ -2,6 +2,10 @@
 
 ## Next
 
+- ZIP downloads with very long file names inside (Meshy names files after the whole prompt) now unpack: long names are shortened and textures/materials are still found
+- Files in an archive without a model extension are recognised by their contents (OBJ, GLB, glTF, FBX, PLY); an archive inside an archive is opened too
+- If an archive really has no model, the report lists what it does contain
+
 - The Generator has been removed; the app opens straight into the Studio again
 - Aircraft tool: Airbus A319 added
 
