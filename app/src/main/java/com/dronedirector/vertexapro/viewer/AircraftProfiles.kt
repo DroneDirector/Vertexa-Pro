@@ -35,6 +35,7 @@ object AircraftProfiles {
     )
 
     val all = listOf(
+        AircraftProfile("Airbus A319", 33.84, listOf("Wingtip fences" to 34.10, "Sharklets" to 35.80), airbusNarrow),
         AircraftProfile("Airbus A320ceo", 37.57, listOf("Wingtip fences" to 34.10, "Sharklets" to 35.80), airbusNarrow),
         AircraftProfile("Airbus A320neo", 37.57, listOf("Sharklets" to 35.80), airbusNarrow),
         AircraftProfile("Airbus A321ceo", 44.51, listOf("Wingtip fences" to 34.10, "Sharklets" to 35.80), airbusNarrow),
@@ -52,4 +53,20 @@ object AircraftProfiles {
             generic = true,
         ),
     )
+
+    /** The profile a request asks for ("Airbus A320neo", "737 max"…); the last one (Other) when unknown. */
+    fun indexFor(text: String): Int {
+        val t = text.lowercase().replace("-", " ")
+        val neo = "neo" in t
+        val name = when {
+            "atr" in t -> "ATR 72-600"
+            "max" in t && "737" in t -> "Boeing 737 MAX 8"
+            "737" in t -> "Boeing 737-800"
+            "321" in t -> if (neo) "Airbus A321neo" else "Airbus A321ceo"
+            "319" in t -> "Airbus A319"
+            "320" in t -> if (neo) "Airbus A320neo" else "Airbus A320ceo"
+            else -> null
+        }
+        return all.indexOfFirst { it.name == name }.let { if (it < 0) all.size - 1 else it }
+    }
 }

@@ -55,6 +55,11 @@ import com.dronedirector.vertexapro.generator.AircraftBuilder
 import com.dronedirector.vertexapro.generator.GenOptions
 import com.dronedirector.vertexapro.generator.Rgb
 import com.dronedirector.vertexapro.generator.Specs
+import com.dronedirector.vertexapro.generator.MeshyJob
+import com.dronedirector.vertexapro.generator.GeneratorHandoff
+import com.dronedirector.vertexapro.viewer.AircraftProfiles
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.LaunchedEffect
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -82,9 +87,45 @@ fun GeneratorScreen(onBack: () -> Unit, onOpen: (File) -> Unit) {
     var progress by remember { mutableFloatStateOf(0f) }
     var stage by remember { mutableStateOf("") }
     var message by remember { mutableStateOf<String?>(null) }
-    var files by remember { mutableStateOf(generatedDir(ctx).listFiles()?.filter { it.extension == "obj" }?.sortedByDescending { it.lastModified() } ?: emptyList()) }
+    val gprefs = remember { ctx.getSharedPreferences("generator", Context.MODE_PRIVATE) }
+    var apiKey by remember { mutableStateOf(gprefs.getString("meshy_key", "") ?: "") }
+    var useAi by remember { mutableStateOf(gprefs.getBoolean("use_ai", true)) }
+    var showKey by remember { mutableStateOf(apiKey.isBlank()) }
+    val ai by MeshyJob.state.collectAsState()
+    LaunchedEffect(ai) {
+        val st = ai
+        if (st is MeshyJob.State.Done) {
+            GeneratorHandoff.set(android.net.Uri.fromFile(st.file), st.profile)
+            MeshyJob.state.value = MeshyJob.State.Idle
+            onOpen(st.file)
+        } else if (st is MeshyJob.State.Failed) {
+            message = st.message
+            MeshyJob.state.value = MeshyJob.State.Idle
+        }
+    }
+    var files by remember { mutableStateOf(generatedDir(ctx).listFiles()?.filter { it.extension == "obj" || it.extension == "glb" }?.sortedByDescending { it.lastModified() } ?: emptyList()) }
+
+    fun generateAi() {
+        val text = prompt.ifBlank { "Airbus A320" }
+        if (apiKey.isBlank()) { showKey = true; message = "Add your Meshy API key first (meshy.ai → API)."; return }
+        val profile = AircraftProfiles.indexFor(text)
+        val prof = AircraftProfiles.all[profile]
+        val typeName = if (prof.generic) "" else prof.name
+        val lower = text.lowercase()
+        val gear = gearDown && !("gear up" in lower || "retracted" in lower || "in flight" in lower)
+        val tailName = tailColors.drop(1).firstOrNull { (n, _) -> n.lowercase() in lower }?.first ?: tailColors[tailIdx].first.takeIf { tailIdx > 0 }
+        val aiPrompt = "$text. Photorealistic, highly detailed commercial airliner $typeName with accurate real-world proportions and shape, " +
+            "correct nose and cockpit, swept wings with flaps, slats and ailerons, detailed engines and pylons, " +
+            (if (gear) "landing gear extended, " else "landing gear retracted, ") +
+            "passenger windows and doors, single aircraft only, no base, no ground, no stand, no people"
+        val texture = "Realistic airline livery: clean white fuselage, " + (tailName?.let { "${it.lowercase()} tail fin, " } ?: "") +
+            "light grey wings and stabilisers, dark tinted cockpit and cabin windows, outlined doors, metallic engine inlets, fine panel lines"
+        message = null
+        MeshyJob.start(generatedDir(ctx), apiKey.trim(), aiPrompt, texture, if (typeName.isNotEmpty()) typeName else text.take(30), profile)
+    }
 
     fun generate() {
+        if (useAi) { generateAi(); return }
         val text = prompt.ifBlank { "Airbus A320" }
         val spec = Specs.parse(text)
         if (spec == null) {
@@ -108,7 +149,7 @@ fun GeneratorScreen(onBack: () -> Unit, onOpen: (File) -> Unit) {
             }
             busy = false
             result.onSuccess { tris ->
-                files = generatedDir(ctx).listFiles()?.filter { it.extension == "obj" }?.sortedByDescending { it.lastModified() } ?: emptyList()
+                files = generatedDir(ctx).listFiles()?.filter { it.extension == "obj" || it.extension == "glb" }?.sortedByDescending { it.lastModified() } ?: emptyList()
                 message = "${spec.name}: ${formatCount(tris)} triangles, ${formatBytes(file.length())}"
                 onOpen(file)
             }.onFailure { message = "Couldn't build it: ${it.message}" }
@@ -144,13 +185,40 @@ fun GeneratorScreen(onBack: () -> Unit, onOpen: (File) -> Unit) {
                 VSpace(10.dp)
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     Specs.all.forEach { s -> PillChip(s.name, prompt.equals(s.name, true), p) { prompt = s.name } }
+                    if (useAi) listOf("Boeing 777-300ER", "Airbus A350-900", "Boeing 787-9").forEach { n -> PillChip(n, prompt == n, p) { prompt = n } }
                 }
                 VSpace(14.dp)
+                Text("Made by", color = p.muted, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                VSpace(6.dp)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    PillChip("AI — realistic", useAi, p) { useAi = true; gprefs.edit().putBoolean("use_ai", true).apply() }
+                    PillChip("Offline — basic", !useAi, p) { useAi = false; gprefs.edit().putBoolean("use_ai", false).apply() }
+                    if (useAi) PillChip(if (showKey) "Hide key" else "API key", false, p) { showKey = !showKey }
+                }
+                if (useAi && showKey) {
+                    VSpace(8.dp)
+                    Box(
+                        Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(p.glass)
+                            .border(1.dp, p.border, RoundedCornerShape(14.dp)).padding(12.dp),
+                    ) {
+                        if (apiKey.isEmpty()) Text("Meshy API key (msy_…)", color = p.muted, fontSize = 14.sp)
+                        BasicTextField(apiKey, { apiKey = it.trim(); gprefs.edit().putString("meshy_key", apiKey).apply() }, singleLine = true,
+                            textStyle = TextStyle(color = p.text, fontSize = 14.sp), cursorBrush = SolidColor(p.accent), modifier = Modifier.fillMaxWidth())
+                    }
+                    Text("From meshy.ai → Settings → API. Each aircraft uses Meshy credits; it's stored only on this phone.", color = p.muted, fontSize = 11.sp)
+                }
+                if (useAi) {
+                    Text("The AI builds a realistic textured aircraft; the app then makes it real size and cuts flaps and ailerons as separate parts. Takes a few minutes.",
+                        color = p.muted, fontSize = 11.sp)
+                }
+                VSpace(10.dp)
+                if (!useAi) {
                 Text("Detail", color = p.muted, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                 VSpace(6.dp)
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     PillChip("High", detail == 1, p) { detail = 1 }
                     PillChip("Ultra", detail == 2, p) { detail = 2 }
+                }
                 }
                 VSpace(10.dp)
                 Text("Landing gear", color = p.muted, fontSize = 12.sp, fontWeight = FontWeight.Bold)
@@ -166,7 +234,14 @@ fun GeneratorScreen(onBack: () -> Unit, onOpen: (File) -> Unit) {
                     tailColors.forEachIndexed { i, (n, _) -> PillChip(n, tailIdx == i, p) { tailIdx = i } }
                 }
                 VSpace(18.dp)
-                if (busy) {
+                val run = ai as? MeshyJob.State.Running
+                if (run != null) {
+                    Text("AI: ${run.stage} · ${(run.progress * 100).toInt()}%", color = p.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    VSpace(8.dp)
+                    LinearProgressIndicator({ run.progress }, Modifier.fillMaxWidth().clip(RoundedCornerShape(50)), color = p.accent, trackColor = p.border)
+                    VSpace(8.dp)
+                    PillChip("Cancel", false, p) { MeshyJob.cancel() }
+                } else if (busy) {
                     Text("Building: $stage · ${(progress * 100).toInt()}%", color = p.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                     VSpace(8.dp)
                     LinearProgressIndicator({ progress }, Modifier.fillMaxWidth().clip(RoundedCornerShape(50)), color = p.accent, trackColor = p.border)

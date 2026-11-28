@@ -2,6 +2,13 @@
 
 ## Next
 
+- Generator now uses AI (Meshy) for realistic, textured aircraft: type any airliner, the AI builds it, and the app automatically scales it to real size and cuts flaps and ailerons as separate parts with hinges
+- Add your Meshy API key once in the Generator; it keeps working in the background while you use the rest of the app, with progress and Cancel
+- The old built-in generator stays available as "Offline — basic"
+- Aircraft tool: Airbus A319 added
+
+## 1.0.21
+
 - New start screen: choose Studio (open, cut and edit models) or Generator
 - Generator: type what you want ("Make me an Airbus A320neo with a red tail") and it builds a detailed aircraft at real size in metres — A319, A320, A320neo, A321, A321neo, Boeing 737-800, 737 MAX 8, ATR 72-600
 - Every piece is its own part: fuselage, wing-body fairing, wings, slats, flaps, ailerons, spoilers, sharklets/winglets, horizontal stabilisers, elevators, fin, rudder, engine nacelles, intake lips, fans with blades, spinners, exhausts, pylons, propellers (ATR), main and nose gear, wheels, hubs, gear doors, passenger doors, overwing exits, cargo doors, cabin and cockpit windows, antennas, probes, lights, APU exhaust
