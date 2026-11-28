@@ -2,6 +2,13 @@
 
 ## Next
 
+- New start screen: choose Studio (open, cut and edit models) or Generator
+- Generator: type what you want ("Make me an Airbus A320neo with a red tail") and it builds a detailed aircraft at real size in metres — A319, A320, A320neo, A321, A321neo, Boeing 737-800, 737 MAX 8, ATR 72-600
+- Every piece is its own part: fuselage, wing-body fairing, wings, slats, flaps, ailerons, spoilers, sharklets/winglets, horizontal stabilisers, elevators, fin, rudder, engine nacelles, intake lips, fans with blades, spinners, exhausts, pylons, propellers (ATR), main and nose gear, wheels, hubs, gear doors, passenger doors, overwing exits, cargo doors, cabin and cockpit windows, antennas, probes, lights, APU exhaust
+- High or Ultra detail, gear down or up, tail colour; the model opens straight in the viewer where every part can be tapped, hidden, cut and exported
+
+## 1.0.20
+
 - Brush Move: drag with one finger to slide the selection across the model's surface — or move a whole drawn outline the same way
 - Brush shapes: circle, square, triangle and diamond (the magnifier shows the brush shape)
 
