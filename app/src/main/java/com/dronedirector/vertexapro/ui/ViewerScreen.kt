@@ -252,6 +252,11 @@ fun ViewerScreen(
             AnimatedVisibility(c.selectedPart >= 0 && !c.cutActive && c.hingePart < 0, enter = fadeIn() + slideInVertically { it }, exit = fadeOut()) {
                 SelectedPartBar(c, p) { renaming = c.selectedPart }
             }
+            val hiddenNow = c.parts.filter { it.index in c.hiddenParts }
+            AnimatedVisibility(
+                hiddenNow.isNotEmpty() && c.selectedPart < 0 && !c.cutActive && c.hingePart < 0 && c.combineFrom < 0,
+                enter = fadeIn() + slideInVertically { it }, exit = fadeOut(),
+            ) { HiddenPartsBar(c, p, hiddenNow) }
             AnimatedVisibility(c.missing.isNotEmpty(), enter = fadeIn() + slideInVertically { it }, exit = fadeOut()) {
                 MissingBanner(c.missing, p, onLinkFolder) { c.dismissMissing() }
             }

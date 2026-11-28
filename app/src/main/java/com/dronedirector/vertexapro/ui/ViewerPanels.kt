@@ -165,6 +165,31 @@ fun PartsPanel(c: ViewerController, p: Palette, onClose: () -> Unit) {
     }
 }
 
+/** Hidden parts are always one tap away: tap a name to show it again, or show them all. */
+@Composable
+fun HiddenPartsBar(c: ViewerController, p: Palette, hidden: List<com.dronedirector.vertexapro.viewer.PartUi>) {
+    Row(
+        Modifier.padding(bottom = 10.dp, start = 12.dp, end = 12.dp).widthIn(max = 560.dp).glass(p, RoundedCornerShape(22.dp), strong = true)
+            .padding(start = 12.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Outlined.VisibilityOff, null, tint = p.muted, modifier = Modifier.size(18.dp))
+        Spacer(Modifier.width(8.dp))
+        Text("${hidden.size} hidden", color = p.text, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+        Spacer(Modifier.width(8.dp))
+        Row(
+            Modifier.weight(1f, fill = false).horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            hidden.take(30).forEach { part ->
+                PillChip(part.name.ifBlank { "Part ${part.index + 1}" }, false, p, trailing = null) { c.setPartVisible(part.index, true) }
+            }
+        }
+        Spacer(Modifier.width(6.dp))
+        PillChip("Show all", true, p) { c.showAllParts() }
+    }
+}
+
 /** Floating actions for the part selected in the view. */
 @Composable
 fun SelectedPartBar(c: ViewerController, p: Palette, onRename: () -> Unit) {

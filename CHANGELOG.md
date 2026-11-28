@@ -2,6 +2,10 @@
 
 ## Next
 
+- Hidden parts can always be shown again: a bar at the bottom lists the hidden parts — tap one to bring it back, or Show all
+
+## 1.0.16
+
 - New Brush tab in the cut menu: paint a selection polygon by polygon or vertex by vertex, and erase it off again with the same brush (adjustable size, magnifier, X-ray to reach hidden polygons)
 - An outline you've drawn turns into a brush selection when you pick the brush, so you can paint more on or erase bits off before creating the part
 - Create a part straight from the brush selection — it stays in place
