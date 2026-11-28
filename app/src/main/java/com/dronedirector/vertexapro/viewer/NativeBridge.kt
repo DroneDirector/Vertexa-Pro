@@ -42,6 +42,12 @@ object NativeBridge {
         erase: FloatArray?,
     ): String
     @JvmStatic external fun nativePreviewCut(h: Long, pts: FloatArray?, depthLo: Float, depthHi: Float, erase: FloatArray?)
+    @JvmStatic external fun nativeBrushSelect(h: Long, x: Float, y: Float, radius: Float, add: Boolean, vertex: Boolean, xray: Boolean): Long
+    @JvmStatic external fun nativeSelectionFromPreview(h: Long): Long
+    @JvmStatic external fun nativeClearSelection(h: Long)
+    @JvmStatic external fun nativeSeparateSelection(h: Long, name: String): String
+    @JvmStatic external fun nativeMergeParts(h: Long, a: Int, b: Int, connect: Boolean): LongArray
+    @JvmStatic external fun nativePartsTouch(h: Long, a: Int, b: Int): Long
     @JvmStatic external fun nativeMirrorPoints(h: Long, pts: FloatArray, axis: Int): FloatArray
     @JvmStatic external fun nativeSetOrtho(h: Long, on: Boolean)
     @JvmStatic external fun nativeViewPreset(h: Long, preset: Int)

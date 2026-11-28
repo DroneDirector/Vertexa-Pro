@@ -241,6 +241,7 @@ fun CreatePartCard(c: ViewerController, p: Palette) {
                 BasicTextField(name, { name = it }, singleLine = true, textStyle = TextStyle(color = p.text, fontSize = 16.sp),
                     cursorBrush = SolidColor(p.accent), modifier = Modifier.fillMaxWidth())
             }
+            if (c.brushSelCount == 0L) {
             VSpace(14.dp)
             Text("How to cut", color = p.muted, fontSize = 12.sp, fontWeight = FontWeight.Bold)
             VSpace(6.dp)
@@ -296,6 +297,7 @@ fun CreatePartCard(c: ViewerController, p: Palette) {
                     value = c.gapMm, onValueChange = { c.gapMm = (it * 2).roundToInt() / 2f }, valueRange = 0f..30f,
                     colors = androidx.compose.material3.SliderDefaults.colors(thumbColor = p.accent, activeTrackColor = p.accent2, inactiveTrackColor = p.border),
                 )
+            }
             }
             VSpace(18.dp)
             if (c.cutBusy) {

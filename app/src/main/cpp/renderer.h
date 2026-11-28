@@ -86,6 +86,19 @@ public:
     struct CutCam;
     bool cutCamera(CutCam& cc);
     void deletePart(int part, Sink* sink);
+    // ---- brush selection (whole triangles / vertices), shown with the orange preview
+    /** Paints with a round brush at a screen point; returns the number of selected triangles. */
+    int64_t brushSelect(float sx, float sy, float radiusPx, bool add, bool vertexMode, bool xray);
+    /** Turns the triangles the pending outline would take into the brush selection. */
+    int64_t selectionFromPreview();
+    void clearSelection();
+    int64_t selectionCount();
+    /** Moves the selected triangles into a new part (stays in place). Returns part index or -1. */
+    int separateSelection(const std::string& name, Sink* sink, int64_t& tris);
+    /** Joins part b into part a. connect: also removes the seal between them and welds the seam. */
+    bool mergeParts(int a, int b, bool connect, Sink* sink, int64_t& sealsRemoved, int64_t& welded);
+    /** Number of vertex positions the two parts share (> 0: they touch). */
+    int64_t partsTouch(int a, int b);
     /** 0 / 1 / 2: the axis the model is most symmetric across (through its centre). */
     int detectMirrorAxis();
     /** Centre of the model along an axis (the mirror plane used by mirror cuts). */
@@ -254,6 +267,9 @@ private:
     std::vector<std::shared_ptr<Chunk>> cpu_;   // geometry kept for editing and saving
     std::vector<std::shared_ptr<Chunk>> undo_;  // geometry before the last cut
     std::vector<std::shared_ptr<Chunk>> redo_;  // geometry after an undone cut
+    std::vector<std::vector<uint8_t>> tsel_, vsel_;  // brush selection per cpu_ chunk (triangles / vertices)
+    void ensureSel_();
+    void selToPreview_();
     std::vector<std::vector<uint32_t>> preview_;  // per cpu_ chunk: triangle indices a pending cut would take
     bool previewDirty_ = false;
     std::vector<GLuint> previewIbo_;

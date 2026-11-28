@@ -2,6 +2,14 @@
 
 ## Next
 
+- New Brush tab in the cut menu: paint a selection polygon by polygon or vertex by vertex, and erase it off again with the same brush (adjustable size, magnifier, X-ray to reach hidden polygons)
+- An outline you've drawn turns into a brush selection when you pick the brush, so you can paint more on or erase bits off before creating the part
+- Create a part straight from the brush selection — it stays in place
+- Combine parts: pick "Combine…" on a part and tap the other one; if they touch, the app asks whether to connect them (removes the seal between them and welds the seam into one mesh) or only combine them
+- Undo works for combine and connect too
+
+## 1.0.15
+
 - Cut tools now live in a menu at the top centre that only appears while cutting, grouped in tabs: Draw · Smart · Refine · View
 - AI select: tap a flap, door or panel and on-device AI (MobileSAM) outlines it; add or remove areas with more taps. One-time 45 MB download, then fully offline
 - Magic wand: tap inside a painted panel and the outline follows its panel lines (adjustable tolerance)

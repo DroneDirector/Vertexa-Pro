@@ -186,6 +186,7 @@ fun SelectedPartBar(c: ViewerController, p: Palette, onRename: () -> Unit) {
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             if (c.canEdit) PillChip(if (c.hinges.containsKey(part.index)) "Hinge ✓" else "Hinge", false, p) { c.startHinge(part.index) }
+            if (c.canEdit && c.parts.size > 1) PillChip("Combine…", false, p) { c.startCombine(part.index) }
             PillChip("Rename", false, p) { onRename() }
             PillChip("Focus", false, p) { c.focusPart(part.index) }
             PillChip("Isolate", false, p) { c.isolatePart(part.index) }

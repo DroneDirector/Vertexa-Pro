@@ -595,15 +595,71 @@ class ViewerController(
     /** Side of the magnifier window in pixels: about 3 cm on the screen. */
     val loupeSizePx: Int get() = (context.resources.displayMetrics.xdpi * 3f / 2.54f).toInt().coerceIn(160, 700)
 
+    // brush selection: whole polygons or vertices, painted on and erased off
+    /** 1 = polygon by polygon, 2 = vertex by vertex. */
+    var brushKind by mutableIntStateOf(1)
+    var brushAdd by mutableStateOf(true)
+    var brushXray by mutableStateOf(false)
+    var brushSelCount by mutableLongStateOf(0L)
+        private set
+    private var brushBusy = false
+
     fun chooseCutTool(t: Int) {
         cutTool = if (cutTool == t && t != TOOL_OUTLINE) TOOL_OUTLINE else t
         cutHint = when (cutTool) {
             TOOL_ERASE -> "Paint over areas the cut must leave alone. Two fingers move the view."
             TOOL_WAND -> "Tap inside a painted panel — the outline follows its lines."
             TOOL_AI -> "Tap the flap or panel you want. Tap again to add, switch to Remove to exclude."
+            TOOL_BRUSH -> if (brushKind == 2) "Paint over vertices to select them — polygons whose corners are all selected are taken."
+                else "Paint over polygons to select them. Switch to Erase to take them off again."
             else -> shapeHint(cutShape)
         }
         if (cutTool == TOOL_AI) aiPoints.clear()
+        if (cutTool == TOOL_BRUSH && brushSelCount == 0L && cutPoints.size >= 3) {
+            // the outline's orange area becomes a polygon selection that the brush can add to and erase from
+            scope.launch {
+                previewJob?.join()
+                val n = withContext(Dispatchers.Default) { safe { NativeBridge.nativeSelectionFromPreview(handle) } } ?: 0L
+                if (n > 0) {
+                    brushSelCount = n
+                    pushOutlineHistory()
+                    cutPoints.clear()
+                    cutHint = "Outline turned into a selection of ${com.dronedirector.vertexapro.data.formatCount(n)} polygons — paint to add or erase."
+                }
+                view?.requestRender()
+            }
+        }
+    }
+
+    private fun brushPaint(x: Float, y: Float) {
+        showLoupe(x, y)
+        if (brushBusy) return
+        brushBusy = true
+        val r = eraseBrushDp * context.resources.displayMetrics.density
+        val add = brushAdd
+        val vertex = brushKind == 2
+        val xray = brushXray
+        scope.launch {
+            val n = withContext(Dispatchers.Default) { safe { NativeBridge.nativeBrushSelect(handle, x, y, r, add, vertex, xray) } }
+            brushBusy = false
+            if (n != null) {
+                brushSelCount = n
+                cutHint = if (n > 0) "${com.dronedirector.vertexapro.data.formatCount(n)} polygons selected — tap Create part when it's right." else "Nothing selected yet."
+            }
+            view?.requestRender()
+        }
+    }
+
+    fun selectBrush(kind: Int) {
+        brushKind = kind
+        if (cutTool != TOOL_BRUSH) chooseCutTool(TOOL_BRUSH)
+        else cutHint = if (kind == 2) "Paint over vertices to select them." else "Paint over polygons to select them."
+    }
+
+    fun clearBrushSelection() {
+        safe { NativeBridge.nativeClearSelection(handle) }
+        brushSelCount = 0
+        view?.requestRender()
     }
 
     private fun shapeHint(s: Int) = com.dronedirector.vertexapro.ui.shapeHint(s)
@@ -615,6 +671,8 @@ class ViewerController(
 
     private fun resetSmart() {
         cutTool = TOOL_OUTLINE
+        if (brushSelCount > 0) safe { NativeBridge.nativeClearSelection(handle) }
+        brushSelCount = 0
         eraseSpots.clear()
         aiPoints.clear()
         lineSnap = false
@@ -632,12 +690,13 @@ class ViewerController(
     }
 
     /** True while one finger paints with the erase brush. */
-    fun isPaintMode() = cutActive && cutTool == TOOL_ERASE && !askConnect && !createPartOpen && !cutBusy
+    fun isPaintMode() = cutActive && (cutTool == TOOL_ERASE || cutTool == TOOL_BRUSH) && !askConnect && !createPartOpen && !cutBusy
 
     private var eraseBusy = false
     private var eraseStroke = false
 
     fun erasePaint(x: Float, y: Float, tap: Boolean = false) {
+        if (cutTool == TOOL_BRUSH) { brushPaint(x, y); return }
         showLoupe(x, y)
         if (eraseBusy) return
         val density = context.resources.displayMetrics.density
@@ -1269,12 +1328,14 @@ class ViewerController(
     /** Shows in orange what the cut would take, a moment after the outline or depth changes. */
     fun schedulePreview() {
         previewJob?.cancel()
+        if (brushSelCount > 0) return
         if (!cutActive || cutPoints.size < 3) { clearPreview(); return }
         val flat = FloatArray(cutPoints.size * 3)
         cutPoints.forEachIndexed { i, p -> System.arraycopy(p, 0, flat, i * 3, 3) }
         val lo = depthLo
         val hi = depthHi
         val er = eraseArray()
+        if (brushSelCount > 0) return
         if (linesOnly) { clearPreview(); return }
         previewJob = scope.launch {
             delay(120)
@@ -1529,6 +1590,7 @@ class ViewerController(
     fun nextCutName(): String = "Cut part ${cutCount + 1}"
 
     fun createPart(name: String, mode: Int) {
+        if (brushSelCount > 0) { separateSelection(name); return }
         if (cutPoints.size < 3) return
         cutBusy = true
         val flat = cutOutline()
@@ -1588,6 +1650,86 @@ class ViewerController(
         }
     }
 
+    private fun separateSelection(name: String) {
+        cutBusy = true
+        scope.launch {
+            val r = withContext(Dispatchers.Default) { safe { NativeBridge.nativeSeparateSelection(handle, name) } } ?: "ERR|Cancelled"
+            cutBusy = false
+            createPartOpen = false
+            if (r.startsWith("ERR|")) { cutHint = r.removePrefix("ERR|"); return@launch }
+            val idx = r.substringBefore('|').toIntOrNull() ?: -1
+            val tris = r.split('|').getOrNull(1)?.toLongOrNull() ?: 0
+            brushSelCount = 0
+            finishNewPart(idx, "Created \"$name\" · ${com.dronedirector.vertexapro.data.formatCount(tris)} triangles")
+        }
+    }
+
+    private suspend fun finishNewPart(idx: Int, message: String) {
+        cutCount++
+        resetSmart()
+        cutActive = false
+        cutPoints.clear()
+        clearOutlineHistory()
+        hasRedo = false
+        cutHint = null
+        hasUndo = true
+        refreshStats()
+        rebuildReport()
+        selectPart(idx)
+        lastCut = message
+        view?.requestRender()
+        delay(250)
+        refreshStats()
+    }
+
+    // ---------------------------------------------------------------- combine / connect parts
+    var combineFrom by mutableIntStateOf(-1)
+        private set
+    /** Two parts waiting for "combine or connect?" and how many points they share. */
+    var combineAsk by mutableStateOf<Triple<Int, Int, Long>?>(null)
+        private set
+
+    fun startCombine(part: Int) {
+        combineFrom = part
+        lastCut = null
+        cutHint = null
+    }
+
+    fun cancelCombine() {
+        combineFrom = -1
+        combineAsk = null
+    }
+
+    private fun askCombine(a: Int, b: Int) {
+        combineFrom = -1
+        scope.launch {
+            val touch = withContext(Dispatchers.Default) { safe { NativeBridge.nativePartsTouch(handle, a, b) } } ?: 0L
+            combineAsk = Triple(a, b, touch)
+        }
+    }
+
+    fun partName(i: Int) = parts.firstOrNull { it.index == i }?.name ?: "Part"
+
+    fun combineParts(connect: Boolean) {
+        val (a, b, _) = combineAsk ?: return
+        combineAsk = null
+        cutBusy = true
+        scope.launch {
+            val r = withContext(Dispatchers.Default) { safe { NativeBridge.nativeMergeParts(handle, a, b, connect) } }
+            cutBusy = false
+            if (r == null || r[0] == 0L) { lastCut = "Couldn't combine those parts."; return@launch }
+            hasUndo = true
+            hasRedo = false
+            refreshStats()
+            rebuildReport()
+            selectPart(a)
+            lastCut = if (connect) "Connected into \"${partName(a)}\" · ${com.dronedirector.vertexapro.data.formatCount(r[1])} seal triangles removed, " +
+                "${com.dronedirector.vertexapro.data.formatCount(r[2])} seam points welded"
+            else "Combined into \"${partName(a)}\""
+            view?.requestRender()
+        }
+    }
+
     fun undoLastCut() {
         scope.launch {
             val ok = withContext(Dispatchers.Default) { safe { NativeBridge.nativeUndoCut(handle) } } ?: false
@@ -1640,6 +1782,9 @@ class ViewerController(
     }
 
     fun selectPart(i: Int) {
+        if (combineFrom >= 0 && i >= 0) {
+            if (i != combineFrom) { askCombine(combineFrom, i); return }
+        }
         selectedPart = i
         safe { NativeBridge.nativeSelectPart(handle, i) }
         view?.requestRender()
@@ -1831,6 +1976,7 @@ class ViewerController(
         const val TOOL_ERASE = 1
         const val TOOL_WAND = 2
         const val TOOL_AI = 3
+        const val TOOL_BRUSH = 4
         const val LIGHT_STUDIO = 0
         const val LIGHT_FLAT = 5
     }

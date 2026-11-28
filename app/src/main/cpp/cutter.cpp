@@ -1,3 +1,5 @@
+#include <unordered_set>
+#include <array>
 // Cut tool: separates the region inside a lasso into a new part, exactly along the lasso.
 //
 // The lasso corners are points on the model's surface. Each pair of neighbouring corners,
@@ -1117,6 +1119,336 @@ std::string Renderer::exportMemory(const ExportOptions& opt, Sink* sink) {
         for (auto& c : cpu_) w.write(*c, origin, parts, mats);
     }
     return w.finish(mats, true);
+}
+
+
+// ======================================================================== brush selection
+void Renderer::ensureSel_() {
+    bool ok = tsel_.size() == cpu_.size() && vsel_.size() == cpu_.size();
+    for (size_t i = 0; ok && i < cpu_.size(); i++)
+        ok = tsel_[i].size() == cpu_[i]->tris.size() / 3 && vsel_[i].size() == cpu_[i]->verts.size();
+    if (ok) return;
+    tsel_.assign(cpu_.size(), {});
+    vsel_.assign(cpu_.size(), {});
+    for (size_t i = 0; i < cpu_.size(); i++) {
+        tsel_[i].assign(cpu_[i]->tris.size() / 3, 0);
+        vsel_[i].assign(cpu_[i]->verts.size(), 0);
+    }
+}
+
+void Renderer::selToPreview_() {
+    std::vector<std::vector<uint32_t>> out(cpu_.size());
+    for (size_t ci = 0; ci < cpu_.size(); ci++) {
+        const Chunk& c = *cpu_[ci];
+        for (size_t t = 0; t * 3 + 2 < c.tris.size(); t++) {
+            const uint32_t* tr = &c.tris[t * 3];
+            if (tsel_[ci][t] || (vsel_[ci][tr[0]] && vsel_[ci][tr[1]] && vsel_[ci][tr[2]]))
+                out[ci].insert(out[ci].end(), {tr[0], tr[1], tr[2]});
+        }
+    }
+    preview_.swap(out);
+    previewDirty_ = true;
+}
+
+static int64_t countSel(const std::vector<std::vector<uint32_t>>& pv) {
+    int64_t n = 0;
+    for (auto& v : pv) n += (int64_t)v.size() / 3;
+    return n;
+}
+
+int64_t Renderer::brushSelect(float sx, float sy, float r, bool add, bool vertexMode, bool xray) {
+    CutCam cc;
+    if (!cutCamera(cc) || r <= 0) return selectionCount();
+    std::vector<uint8_t> hidden;
+    double diag = 1;
+    {
+        std::lock_guard<std::mutex> l(mu_);
+        hidden = hidden_;
+        if (bounds_.valid()) {
+            double dx = bounds_.mx[0] - bounds_.mn[0], dy = bounds_.mx[1] - bounds_.mn[1], dz = bounds_.mx[2] - bounds_.mn[2];
+            diag = std::sqrt(dx * dx + dy * dy + dz * dz);
+        }
+    }
+    std::lock_guard<std::mutex> dl(dataMu_);
+    if (!keepCpu_ || cpu_.empty()) return 0;
+    ensureSel_();
+    const int G = 32;
+    const double x0 = sx - r, y0 = sy - r, cell = 2.0 * r / G, eps = diag * 0.004;
+    std::vector<double> zb(G * G, 1e300);
+    auto depthOf = [&](const float* p) { return (V3(p[0], p[1], p[2]) - cc.eye).dot(cc.fwd); };
+    struct Cand { uint32_t ci, t; };
+    std::vector<Cand> cands;
+    for (size_t ci = 0; ci < cpu_.size(); ci++) {
+        const Chunk& c = *cpu_[ci];
+        if (c.points || c.tris.empty()) continue;
+        if (c.part >= 0 && c.part < (int)hidden.size() && hidden[c.part]) continue;
+        for (size_t t = 0; t * 3 + 2 < c.tris.size(); t++) {
+            double px[3], py[3], pd[3];
+            bool ok = true;
+            for (int k = 0; k < 3 && ok; k++) {
+                const float* p = c.verts[c.tris[t * 3 + k]].p;
+                ok = projectCC(cc, p, px[k], py[k]);
+                pd[k] = depthOf(p);
+            }
+            if (!ok) continue;
+            double mnx = std::min({px[0], px[1], px[2]}), mxx = std::max({px[0], px[1], px[2]});
+            double mny = std::min({py[0], py[1], py[2]}), mxy = std::max({py[0], py[1], py[2]});
+            if (mxx < x0 || mnx > sx + r || mxy < y0 || mny > sy + r) continue;
+            cands.push_back({(uint32_t)ci, (uint32_t)t});
+            if (xray) continue;
+            // small depth buffer over the brush: what's in front hides what's behind
+            double den = (py[1] - py[2]) * (px[0] - px[2]) + (px[2] - px[1]) * (py[0] - py[2]);
+            if (std::fabs(den) < 1e-12) continue;
+            int gx0 = std::max(0, (int)std::floor((mnx - x0) / cell)), gx1 = std::min(G - 1, (int)std::floor((mxx - x0) / cell));
+            int gy0 = std::max(0, (int)std::floor((mny - y0) / cell)), gy1 = std::min(G - 1, (int)std::floor((mxy - y0) / cell));
+            for (int gy = gy0; gy <= gy1; gy++)
+                for (int gx = gx0; gx <= gx1; gx++) {
+                    double cx = x0 + (gx + 0.5) * cell, cy = y0 + (gy + 0.5) * cell;
+                    double w0 = ((py[1] - py[2]) * (cx - px[2]) + (px[2] - px[1]) * (cy - py[2])) / den;
+                    double w1 = ((py[2] - py[0]) * (cx - px[2]) + (px[0] - px[2]) * (cy - py[2])) / den;
+                    double w2 = 1 - w0 - w1;
+                    if (w0 < -0.01 || w1 < -0.01 || w2 < -0.01) continue;
+                    double d = w0 * pd[0] + w1 * pd[1] + w2 * pd[2];
+                    double& z = zb[gy * G + gx];
+                    if (d < z) z = d;
+                }
+        }
+    }
+    auto visible = [&](double x, double y, double d) {
+        if (xray) return true;
+        int gx = std::clamp((int)std::floor((x - x0) / cell), 0, G - 1), gy = std::clamp((int)std::floor((y - y0) / cell), 0, G - 1);
+        double z = zb[gy * G + gx];
+        return z >= 1e299 || d <= z + eps;
+    };
+    const double r2 = (double)r * r;
+    for (auto& cd : cands) {
+        const Chunk& c = *cpu_[cd.ci];
+        const uint32_t* tr = &c.tris[cd.t * 3];
+        if (!vertexMode) {
+            const float* a = c.verts[tr[0]].p; const float* b = c.verts[tr[1]].p; const float* e = c.verts[tr[2]].p;
+            float cen[3] = {(a[0] + b[0] + e[0]) / 3, (a[1] + b[1] + e[1]) / 3, (a[2] + b[2] + e[2]) / 3};
+            double x, y;
+            if (!projectCC(cc, cen, x, y)) continue;
+            if ((x - sx) * (x - sx) + (y - sy) * (y - sy) > r2 || !visible(x, y, depthOf(cen))) continue;
+            tsel_[cd.ci][cd.t] = add ? 1 : 0;
+            if (!add) for (int k = 0; k < 3; k++) vsel_[cd.ci][tr[k]] = 0;
+        } else {
+            for (int k = 0; k < 3; k++) {
+                const float* p = c.verts[tr[k]].p;
+                double x, y;
+                if (!projectCC(cc, p, x, y)) continue;
+                if ((x - sx) * (x - sx) + (y - sy) * (y - sy) > r2 || !visible(x, y, depthOf(p))) continue;
+                vsel_[cd.ci][tr[k]] = add ? 1 : 0;
+                if (!add) tsel_[cd.ci][cd.t] = 0;
+            }
+        }
+    }
+    selToPreview_();
+    return countSel(preview_);
+}
+
+int64_t Renderer::selectionFromPreview() {
+    std::lock_guard<std::mutex> dl(dataMu_);
+    if (!keepCpu_ || cpu_.empty()) return 0;
+    ensureSel_();
+    for (size_t ci = 0; ci < cpu_.size() && ci < preview_.size(); ci++) {
+        const auto& pv = preview_[ci];
+        const auto& tris = cpu_[ci]->tris;
+        size_t k = 0;
+        for (size_t t = 0; t * 3 + 2 < tris.size() && k + 2 < pv.size(); t++)
+            if (pv[k] == tris[t * 3] && pv[k + 1] == tris[t * 3 + 1] && pv[k + 2] == tris[t * 3 + 2]) { tsel_[ci][t] = 1; k += 3; }
+    }
+    selToPreview_();
+    return countSel(preview_);
+}
+
+void Renderer::clearSelection() {
+    std::lock_guard<std::mutex> dl(dataMu_);
+    tsel_.clear();
+    vsel_.clear();
+    preview_.clear();
+    previewDirty_ = true;
+}
+
+int64_t Renderer::selectionCount() {
+    std::lock_guard<std::mutex> dl(dataMu_);
+    if (tsel_.size() != cpu_.size()) return 0;
+    return countSel(preview_);
+}
+
+int Renderer::separateSelection(const std::string& name, Sink* sink, int64_t& moved) {
+    moved = 0;
+    if (!sink) return -1;
+    std::lock_guard<std::mutex> dl(dataMu_);
+    if (!keepCpu_ || cpu_.empty() || tsel_.size() != cpu_.size()) return -1;
+    int64_t any = countSel(preview_);
+    if (any == 0) return -1;
+    int newPart = sink->addPart(name.empty() ? "Selected part" : name);
+    std::vector<std::shared_ptr<Chunk>> result;
+    for (size_t ci = 0; ci < cpu_.size(); ci++) {
+        const Chunk& c = *cpu_[ci];
+        std::vector<uint32_t> keep, cut;
+        for (size_t t = 0; t * 3 + 2 < c.tris.size(); t++) {
+            const uint32_t* tr = &c.tris[t * 3];
+            bool s = tsel_[ci][t] || (vsel_[ci][tr[0]] && vsel_[ci][tr[1]] && vsel_[ci][tr[2]]);
+            (s ? cut : keep).insert((s ? cut : keep).end(), {tr[0], tr[1], tr[2]});
+        }
+        if (cut.empty()) { result.push_back(cpu_[ci]); continue; }
+        moved += (int64_t)cut.size() / 3;
+        if (auto k = buildChunk(c.verts, keep, c.material, c.part)) result.push_back(std::shared_ptr<Chunk>(k.release()));
+        if (auto n = buildChunk(c.verts, cut, c.material, newPart)) result.push_back(std::shared_ptr<Chunk>(n.release()));
+    }
+    undo_ = cpu_;
+    redo_.clear();
+    cpu_.swap(result);
+    tsel_.clear();
+    vsel_.clear();
+    preview_.clear();
+    previewDirty_ = true;
+    rebuildGpu_ = true;
+    recomputeParts(sink);
+    sink->log(0, "Selection \"" + name + "\": " + std::to_string(moved) + " triangles moved to a new part.");
+    return newPart;
+}
+
+namespace {
+struct QKey {
+    int64_t x, y, z;
+    bool operator==(const QKey& o) const { return x == o.x && y == o.y && z == o.z; }
+};
+struct QKeyHash {
+    size_t operator()(const QKey& k) const {
+        return (size_t)(k.x * 73856093LL ^ k.y * 19349663LL ^ k.z * 83492791LL);
+    }
+};
+}  // namespace
+
+int64_t Renderer::partsTouch(int a, int b) {
+    double q = 1;
+    {
+        std::lock_guard<std::mutex> l(mu_);
+        if (bounds_.valid()) {
+            double s = std::max({bounds_.mx[0] - bounds_.mn[0], bounds_.mx[1] - bounds_.mn[1], bounds_.mx[2] - bounds_.mn[2]});
+            q = s > 0 ? 2e6 / s : 1;
+        }
+    }
+    std::lock_guard<std::mutex> dl(dataMu_);
+    auto key = [&](const float* p) { return QKey{(int64_t)std::llround(p[0] * q), (int64_t)std::llround(p[1] * q), (int64_t)std::llround(p[2] * q)}; };
+    std::unordered_set<QKey, QKeyHash> sa;
+    for (auto& c : cpu_) if (c->part == a && !c->points) for (auto& v : c->verts) sa.insert(key(v.p));
+    if (sa.empty()) return 0;
+    std::unordered_set<QKey, QKeyHash> hit;
+    for (auto& c : cpu_) if (c->part == b && !c->points) for (auto& v : c->verts) { QKey k = key(v.p); if (sa.count(k)) hit.insert(k); }
+    return (int64_t)hit.size();
+}
+
+bool Renderer::mergeParts(int a, int b, bool connect, Sink* sink, int64_t& seals, int64_t& welded) {
+    seals = 0;
+    welded = 0;
+    if (!sink || a == b || a < 0 || b < 0) return false;
+    double q = 1;
+    {
+        std::lock_guard<std::mutex> l(mu_);
+        if (bounds_.valid()) {
+            double s = std::max({bounds_.mx[0] - bounds_.mn[0], bounds_.mx[1] - bounds_.mn[1], bounds_.mx[2] - bounds_.mn[2]});
+            q = s > 0 ? 2e6 / s : 1;
+        }
+    }
+    std::lock_guard<std::mutex> dl(dataMu_);
+    if (!keepCpu_ || cpu_.empty()) return false;
+    auto key = [&](const float* p) { return QKey{(int64_t)std::llround(p[0] * q), (int64_t)std::llround(p[1] * q), (int64_t)std::llround(p[2] * q)}; };
+    std::vector<std::shared_ptr<Chunk>> result, merged;
+    for (auto& c : cpu_) {
+        if (c->part != a && c->part != b) { result.push_back(c); continue; }
+        auto n = std::make_shared<Chunk>(*c);
+        n->part = a;
+        n->animSlot = c->animSlot;
+        merged.push_back(n);
+    }
+    if (connect) {
+        // 1. the seals a cut put on both sides of the opening face each other: remove both
+        auto triKey = [&](const Chunk& c, size_t t) {
+            std::array<QKey, 3> k = {key(c.verts[c.tris[t]].p), key(c.verts[c.tris[t + 1]].p), key(c.verts[c.tris[t + 2]].p)};
+            std::sort(k.begin(), k.end(), [](const QKey& x, const QKey& y) { return x.x != y.x ? x.x < y.x : x.y != y.y ? x.y < y.y : x.z < y.z; });
+            return k;
+        };
+        struct AH { size_t operator()(const std::array<QKey, 3>& k) const { QKeyHash h; return h(k[0]) * 31 ^ h(k[1]) * 17 ^ h(k[2]); } };
+        std::unordered_map<std::array<QKey, 3>, int, AH> count;
+        for (size_t i = 0; i < cpu_.size(); i++) {
+            const Chunk& c = *cpu_[i];
+            if ((c.part != a && c.part != b) || c.material != -1) continue;
+            for (size_t t = 0; t + 2 < c.tris.size(); t += 3) count[triKey(c, t)] |= (c.part == a ? 1 : 2);
+        }
+        for (auto& m : merged) {
+            if (m->material != -1) continue;
+            std::vector<uint32_t> keep;
+            for (size_t t = 0; t + 2 < m->tris.size(); t += 3) {
+                auto it = count.find(triKey(*m, t));
+                if (it != count.end() && it->second == 3) { seals++; continue; }
+                keep.insert(keep.end(), {m->tris[t], m->tris[t + 1], m->tris[t + 2]});
+            }
+            if (keep.size() != m->tris.size()) {
+                auto nc = buildChunk(m->verts, keep, m->material, a);
+                if (nc) m = std::shared_ptr<Chunk>(nc.release());
+                else m.reset();
+            }
+        }
+        merged.erase(std::remove(merged.begin(), merged.end(), nullptr), merged.end());
+        // 2. chunks with the same material become one mesh; identical seam vertices are welded
+        std::vector<std::shared_ptr<Chunk>> joined;
+        std::vector<bool> used(merged.size(), false);
+        for (size_t i = 0; i < merged.size(); i++) {
+            if (used[i]) continue;
+            used[i] = true;
+            if (merged[i]->points || merged[i]->animSlot >= 0) { joined.push_back(merged[i]); continue; }
+            std::vector<Vertex> verts;
+            std::vector<uint32_t> tris;
+            auto add = [&](const Chunk& c) {
+                uint32_t base = (uint32_t)verts.size();
+                verts.insert(verts.end(), c.verts.begin(), c.verts.end());
+                for (uint32_t t : c.tris) tris.push_back(base + t);
+            };
+            add(*merged[i]);
+            for (size_t j = i + 1; j < merged.size(); j++) {
+                if (used[j] || merged[j]->material != merged[i]->material || merged[j]->points || merged[j]->animSlot >= 0) continue;
+                if (verts.size() + merged[j]->verts.size() > 1000000) continue;
+                used[j] = true;
+                add(*merged[j]);
+            }
+            // weld: same position, normal, uv and colour
+            std::unordered_map<std::string, uint32_t> seen;
+            seen.reserve(verts.size());
+            std::vector<uint32_t> remap(verts.size());
+            std::vector<Vertex> out;
+            out.reserve(verts.size());
+            for (size_t v = 0; v < verts.size(); v++) {
+                std::string k((const char*)&verts[v], sizeof(Vertex));
+                auto it = seen.find(k);
+                if (it != seen.end()) { remap[v] = it->second; welded++; continue; }
+                remap[v] = (uint32_t)out.size();
+                seen.emplace(std::move(k), remap[v]);
+                out.push_back(verts[v]);
+            }
+            for (auto& t : tris) t = remap[t];
+            std::vector<uint32_t> all(tris.size());
+            for (size_t t = 0; t < tris.size(); t++) all[t] = tris[t];
+            if (auto nc = buildChunk(out, all, merged[i]->material, a)) joined.push_back(std::shared_ptr<Chunk>(nc.release()));
+        }
+        merged.swap(joined);
+    }
+    for (auto& m : merged) result.push_back(m);
+    undo_ = cpu_;
+    redo_.clear();
+    cpu_.swap(result);
+    tsel_.clear();
+    vsel_.clear();
+    preview_.clear();
+    previewDirty_ = true;
+    rebuildGpu_ = true;
+    recomputeParts(sink);
+    sink->log(0, std::string(connect ? "Connected" : "Combined") + " two parts" +
+                     (connect ? ": " + std::to_string(seals) + " seal triangles removed, " + std::to_string(welded) + " seam vertices welded." : "."));
+    return true;
 }
 
 }  // namespace vx

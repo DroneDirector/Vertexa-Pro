@@ -63,7 +63,7 @@ import com.dronedirector.vertexapro.viewer.CutGeometry
 import com.dronedirector.vertexapro.viewer.ViewerController
 import kotlin.math.roundToInt
 
-private val cutTabs = listOf("Draw", "Smart", "Refine", "View")
+private val cutTabs = listOf("Draw", "Brush", "Smart", "Refine", "View")
 
 /** Top-centre cut menu: only shown while the cut tool is on, its tools grouped in four tabs. */
 @Composable
@@ -85,6 +85,10 @@ fun CutToolbar(c: ViewerController, p: Palette) {
             Spacer(Modifier.width(4.dp))
             ToolIcon(Icons.AutoMirrored.Outlined.Redo, "Redo", c.canRedoPoint, p) { c.redoCutPoint() }
             Spacer(Modifier.width(4.dp))
+            if (c.brushSelCount > 0) {
+                ToolIcon(Icons.Outlined.ContentCut, "Create part from selection", true, p) { c.createPartOpen = true }
+                Spacer(Modifier.width(4.dp))
+            }
             if (c.cutShape <= CutGeometry.CURVE && c.cutPoints.size >= 3) {
                 ToolIcon(Icons.Outlined.Link, "Close outline", true, p) { c.askConnect = true }
                 Spacer(Modifier.width(4.dp))
@@ -100,14 +104,15 @@ fun CutToolbar(c: ViewerController, p: Palette) {
                     Modifier.weight(1f).clip(RoundedCornerShape(50)).then(if (sel) Modifier.background(p.accentBrush) else Modifier)
                         .pressable { tab = i }.padding(vertical = 6.dp),
                     contentAlignment = Alignment.Center,
-                ) { Text(label, color = if (sel) Color.White else p.text, fontSize = 13.sp, fontWeight = if (sel) FontWeight.Bold else FontWeight.Medium) }
+                ) { Text(label, color = if (sel) Color.White else p.text, fontSize = 12.sp, maxLines = 1, fontWeight = if (sel) FontWeight.Bold else FontWeight.Medium) }
             }
         }
         Spacer(Modifier.size(8.dp))
         when (tab) {
             0 -> DrawTab(c, p)
-            1 -> SmartTab(c, p)
-            2 -> RefineTab(c, p)
+            1 -> BrushTab(c, p)
+            2 -> SmartTab(c, p)
+            3 -> RefineTab(c, p)
             else -> ViewTab(c, p)
         }
     }
@@ -155,6 +160,43 @@ private fun DrawTab(c: ViewerController, p: Palette) {
 }
 
 @Composable
+private fun BrushTab(c: ViewerController, p: Palette) {
+    val t = c.cutTool
+    ChipRow {
+        PillChip("Polygons", t == ViewerController.TOOL_BRUSH && c.brushKind == 1, p) { c.selectBrush(1) }
+        PillChip("Vertices", t == ViewerController.TOOL_BRUSH && c.brushKind == 2, p) { c.selectBrush(2) }
+        PillChip("Smooth erase", t == ViewerController.TOOL_ERASE, p) { c.chooseCutTool(ViewerController.TOOL_ERASE) }
+    }
+    if (t == ViewerController.TOOL_BRUSH) {
+        Spacer(Modifier.size(6.dp))
+        ChipRow {
+            PillChip("Select", c.brushAdd, p) { c.brushAdd = true }
+            PillChip("Erase", !c.brushAdd, p) { c.brushAdd = false }
+            PillChip("X-ray", c.brushXray, p) { c.brushXray = !c.brushXray }
+            if (c.brushSelCount > 0) PillChip("Clear", false, p) { c.clearBrushSelection() }
+            if (c.brushSelCount > 0) PillChip("Create part", false, p) { c.createPartOpen = true }
+        }
+    }
+    if (t == ViewerController.TOOL_ERASE && c.eraseSpots.isNotEmpty()) {
+        Spacer(Modifier.size(6.dp))
+        ChipRow { PillChip("Clear erase", false, p) { c.clearErase() } }
+    }
+    if (t == ViewerController.TOOL_BRUSH || t == ViewerController.TOOL_ERASE) {
+        LabeledSlider("Brush size", "${c.eraseBrushDp.roundToInt()} dp", p) { m ->
+            Slider(c.eraseBrushDp, { c.updateBrush(it) }, m, valueRange = 4f..90f, colors = sliderColors(p))
+        }
+    }
+    Text(
+        when (t) {
+            ViewerController.TOOL_BRUSH -> "Paint with one finger, two fingers move the view. X-ray also reaches polygons hidden behind."
+            ViewerController.TOOL_ERASE -> "Smooth erase keeps the exact cut line and protects what you paint (red)."
+            else -> "Pick Polygons or Vertices to paint a selection, or Smooth erase to protect areas from an outline cut."
+        },
+        color = p.muted, fontSize = 11.sp,
+    )
+}
+
+@Composable
 private fun SmartTab(c: ViewerController, p: Palette) {
     ChipRow {
         PillChip("AI select", c.cutTool == ViewerController.TOOL_AI, p, trailing = if (c.cutTool == ViewerController.TOOL_AI) Icons.Outlined.AutoAwesome else null) {
@@ -188,8 +230,6 @@ private fun SmartTab(c: ViewerController, p: Palette) {
 @Composable
 private fun RefineTab(c: ViewerController, p: Palette) {
     ChipRow {
-        PillChip("Erase brush", c.cutTool == ViewerController.TOOL_ERASE, p) { c.chooseCutTool(ViewerController.TOOL_ERASE) }
-        if (c.eraseSpots.isNotEmpty()) PillChip("Clear erase", false, p) { c.clearErase() }
         if (c.cutShape <= CutGeometry.CURVE) {
             PillChip("Snap", c.snapOn, p) { c.snapOn = !c.snapOn }
             PillChip("Straight 45°", c.straightOn, p) { c.straightOn = !c.straightOn }
@@ -197,11 +237,6 @@ private fun RefineTab(c: ViewerController, p: Palette) {
         if (c.selectedCutPoint >= 0) PillChip("Delete point", false, p) { c.deleteSelectedPoint() }
     }
     Spacer(Modifier.size(4.dp))
-    if (c.cutTool == ViewerController.TOOL_ERASE) {
-        LabeledSlider("Brush size", "${c.eraseBrushDp.roundToInt()} dp", p) { m ->
-            Slider(c.eraseBrushDp, { c.updateBrush(it) }, m, valueRange = 8f..90f, colors = sliderColors(p))
-        }
-    }
     if (c.cutPoints.size >= 3 && c.cutShape != CutGeometry.FLAP) {
         LabeledSlider(
             "Depth",
@@ -265,7 +300,7 @@ fun CutLoupe(c: ViewerController, p: Palette) {
                 }
                 // crosshair on the finger
                 val f = map(at.x, at.y)
-                val r = if (c.cutTool == ViewerController.TOOL_ERASE) c.eraseBrushDp * density.density * k else 10.dp.toPx()
+                val r = if (c.cutTool == ViewerController.TOOL_ERASE || c.cutTool == ViewerController.TOOL_BRUSH) c.eraseBrushDp * density.density * k else 10.dp.toPx()
                 drawCircle(Color.Black.copy(alpha = 0.5f), r, f, style = Stroke(3.dp.toPx()))
                 drawCircle(Color.White, r, f, style = Stroke(1.5.dp.toPx()))
                 drawLine(Color.White, Offset(f.x - 6.dp.toPx(), f.y), Offset(f.x + 6.dp.toPx(), f.y), strokeWidth = 1.dp.toPx())
@@ -305,6 +340,57 @@ fun AiDownloadCard(c: ViewerController, p: Palette) {
                 Text("${(progress * 100).toInt()}%", color = p.text, fontSize = 28.sp, fontWeight = FontWeight.Black)
                 Spacer(Modifier.size(10.dp))
                 LinearProgressIndicator({ progress }, Modifier.fillMaxWidth().clip(RoundedCornerShape(50)), color = p.accent, trackColor = p.border)
+            }
+        }
+    }
+}
+
+/** "Tap the part to combine with" while choosing the second part. */
+@Composable
+fun CombineBanner(c: ViewerController, p: Palette) {
+    Row(
+        Modifier.widthIn(max = 460.dp).glass(p, RoundedCornerShape(22.dp), strong = true).padding(start = 14.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Outlined.Link, null, tint = p.accent, modifier = Modifier.size(18.dp))
+        Spacer(Modifier.width(10.dp))
+        Text(
+            "Tap the part to combine with \u201c${c.partName(c.combineFrom)}\u201d — in the view or the Parts list",
+            color = p.text, fontSize = 13.sp, modifier = Modifier.weight(1f, fill = false),
+        )
+        Spacer(Modifier.width(8.dp))
+        PillChip("Cancel", false, p) { c.cancelCombine() }
+    }
+}
+
+/** Asks whether two parts should just be combined or connected into one mesh. */
+@Composable
+fun CombineDialog(c: ViewerController, p: Palette, ask: Triple<Int, Int, Long>) {
+    val (a, b, touch) = ask
+    Box(Modifier.fillMaxSize().background(Color(0x66000000)).pressable { c.cancelCombine() }, contentAlignment = Alignment.Center) {
+        Column(
+            Modifier.padding(24.dp).widthIn(max = 380.dp).glass(p, RoundedCornerShape(30.dp), strong = true).pressable { }.padding(24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Box(
+                Modifier.size(64.dp).clip(CircleShape).background(Brush.linearGradient(listOf(p.accent, Color(0xFFFF9E26)))),
+                contentAlignment = Alignment.Center,
+            ) { Icon(Icons.Outlined.Link, null, tint = Color.White, modifier = Modifier.size(30.dp)) }
+            Spacer(Modifier.size(16.dp))
+            Text("Connect them?", color = p.text, fontSize = 20.sp, fontWeight = FontWeight.Black)
+            Spacer(Modifier.size(6.dp))
+            Text(
+                "\u201c${c.partName(b)}\u201d goes into \u201c${c.partName(a)}\u201d. " +
+                    if (touch > 0) "They touch along ${com.dronedirector.vertexapro.data.formatCount(touch)} points — connecting removes the seal between them and welds the seam into one mesh."
+                    else "They don't touch, so they'll be combined into one part.",
+                color = p.muted, fontSize = 14.sp, textAlign = TextAlign.Center,
+            )
+            Spacer(Modifier.size(20.dp))
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                if (touch > 0) GradientButton("Connect", Icons.Outlined.Link, p, Modifier.fillMaxWidth()) { c.combineParts(true) }
+                if (touch > 0) GlassButton("Only combine", null, p, Modifier.fillMaxWidth()) { c.combineParts(false) }
+                else GradientButton("Combine", Icons.Outlined.Link, p, Modifier.fillMaxWidth()) { c.combineParts(false) }
+                GlassButton("Cancel", null, p, Modifier.fillMaxWidth()) { c.cancelCombine() }
             }
         }
     }

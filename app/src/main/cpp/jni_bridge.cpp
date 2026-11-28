@@ -492,6 +492,31 @@ JNIEXPORT jboolean JNICALL FN(nativeSnapshot)(JNIEnv* env, jobject, jlong h, jin
     if (!out || env->GetDirectBufferCapacity(buffer) < (jlong)w * hh * 4) return JNI_FALSE;
     return E(h)->renderer.snapshot(w, hh, transparent, out) ? JNI_TRUE : JNI_FALSE;
 }
+JNIEXPORT jlong JNICALL FN(nativeBrushSelect)(JNIEnv*, jobject, jlong h, jfloat x, jfloat y, jfloat r, jboolean add, jboolean vertex, jboolean xray) {
+    return E(h)->renderer.brushSelect(x, y, r, add, vertex, xray);
+}
+JNIEXPORT jlong JNICALL FN(nativeSelectionFromPreview)(JNIEnv*, jobject, jlong h) { return E(h)->renderer.selectionFromPreview(); }
+JNIEXPORT void JNICALL FN(nativeClearSelection)(JNIEnv*, jobject, jlong h) { E(h)->renderer.clearSelection(); }
+JNIEXPORT jstring JNICALL FN(nativeSeparateSelection)(JNIEnv* env, jobject, jlong h, jstring name) {
+    const char* c = env->GetStringUTFChars(name, nullptr);
+    std::string n = c ? c : "";
+    if (c) env->ReleaseStringUTFChars(name, c);
+    auto s = E(h)->sink();
+    int64_t tris = 0;
+    int part = E(h)->renderer.separateSelection(n, s.get(), tris);
+    std::string r = part < 0 ? std::string("ERR|Select some of the model with the brush first.") : std::to_string(part) + "|" + std::to_string(tris) + "|0";
+    return env->NewStringUTF(r.c_str());
+}
+JNIEXPORT jlongArray JNICALL FN(nativeMergeParts)(JNIEnv* env, jobject, jlong h, jint a, jint b, jboolean connect) {
+    auto s = E(h)->sink();
+    int64_t seals = 0, welded = 0;
+    bool ok = E(h)->renderer.mergeParts(a, b, connect, s.get(), seals, welded);
+    jlong v[3] = {ok ? 1 : 0, (jlong)seals, (jlong)welded};
+    jlongArray arr = env->NewLongArray(3);
+    env->SetLongArrayRegion(arr, 0, 3, v);
+    return arr;
+}
+JNIEXPORT jlong JNICALL FN(nativePartsTouch)(JNIEnv*, jobject, jlong h, jint a, jint b) { return E(h)->renderer.partsTouch(a, b); }
 JNIEXPORT jfloatArray JNICALL FN(nativeMirrorPoints)(JNIEnv* env, jobject, jlong h, jfloatArray pts, jint ax) {
     std::vector<float> p = floats(env, pts);
     if (ax >= 0 && ax < 3) {
