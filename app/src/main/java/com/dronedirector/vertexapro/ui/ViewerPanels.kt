@@ -2,6 +2,9 @@ package com.dronedirector.vertexapro.ui
 
 import android.content.Intent
 import androidx.compose.foundation.background
+import androidx.compose.material.icons.outlined.ContentCut
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -64,7 +67,7 @@ import com.dronedirector.vertexapro.data.formatCount
 import com.dronedirector.vertexapro.viewer.JobState
 import com.dronedirector.vertexapro.viewer.ViewerController
 
-enum class Panel { NONE, PARTS, LIGHT, POINTS, CAPTURE, EXPORT, VIEWS, CAMERA }
+enum class Panel { NONE, PARTS, LIGHT, POINTS, CAPTURE, EXPORT, VIEWS, CAMERA, AIRCRAFT }
 
 @Composable
 private fun PanelShell(title: String, subtitle: String?, p: Palette, onClose: () -> Unit, content: @Composable () -> Unit) {
@@ -448,5 +451,90 @@ fun CameraPanel(c: ViewerController, p: Palette, onClose: () -> Unit) {
         }
         VSpace(10.dp)
         SwitchRow("Flat view (no perspective)", "Straight lines stay straight — best for drawing cuts", c.ortho, true, p) { c.toggleOrtho() }
+    }
+}
+
+// ---------------------------------------------------------------- aircraft
+
+@Composable
+fun AircraftPanel(c: ViewerController, p: Palette, onClose: () -> Unit) {
+    androidx.compose.runtime.LaunchedEffect(c.aircraftType) { c.checkRealSize() }
+    PanelShell("Aircraft", "Real size and control surfaces", p, onClose) {
+        Column(Modifier.verticalScroll(rememberScrollState())) {
+            Text("Type", color = p.muted, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            VSpace(6.dp)
+            com.dronedirector.vertexapro.viewer.AircraftProfiles.all.chunked(2).forEach { row ->
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(bottom = 6.dp)) {
+                    row.forEach { prof ->
+                        val i = com.dronedirector.vertexapro.viewer.AircraftProfiles.all.indexOf(prof)
+                        PillChip(prof.name, c.aircraftType == i, p) { c.aircraftType = i }
+                    }
+                }
+            }
+            VSpace(8.dp)
+            Text("Real size", color = p.text, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+            val sz = c.airSize
+            val prof = c.airProfile
+            if (sz != null && !prof.generic && sz.byLength > 0) {
+                val lenAfterSpan = sz.lengthUnits * sz.bySpan
+                Text(
+                    "Real: ${"%.2f".format(prof.lengthM)} m long, ${"%.2f".format(prof.spansM.first { it.first == sz.spanName }.second)} m span (${sz.spanName}). " +
+                        "Your model: ${"%.3g".format(sz.lengthUnits)} × ${"%.3g".format(sz.spanUnits)} units." +
+                        if (kotlin.math.abs(sz.byLength / sz.bySpan - 1) > 0.06)
+                            " Its proportions differ from the real one (by span it would be ${"%.2f".format(lenAfterSpan)} m long)."
+                        else " Proportions match.",
+                    color = p.muted, fontSize = 12.sp,
+                )
+                VSpace(8.dp)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    PillChip("Scale by length", false, p) { c.applyRealSize(true) }
+                    PillChip("By wingspan", false, p) { c.applyRealSize(false) }
+                }
+            } else {
+                Text("Pick a type, or measure two points and type the real distance.", color = p.muted, fontSize = 12.sp)
+            }
+            if (c.measurePoints.size >= 2) {
+                VSpace(8.dp)
+                var meters by remember { mutableStateOf("") }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.weight(1f).clip(RoundedCornerShape(12.dp)).background(p.glass).border(1.dp, p.border, RoundedCornerShape(12.dp)).padding(10.dp)) {
+                        if (meters.isEmpty()) Text("Measured distance in m", color = p.muted, fontSize = 13.sp)
+                        BasicTextField(meters, { meters = it.filter { ch -> ch.isDigit() || ch == '.' || ch == ',' } }, singleLine = true,
+                            textStyle = TextStyle(color = p.text, fontSize = 14.sp), cursorBrush = SolidColor(p.accent), modifier = Modifier.fillMaxWidth())
+                    }
+                    Spacer(Modifier.width(6.dp))
+                    PillChip("Set", false, p) { meters.replace(',', '.').toDoubleOrNull()?.let { c.applyMeasuredSize(it) } }
+                }
+            }
+            VSpace(14.dp)
+            Text("Control surfaces", color = p.text, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+            SwitchRow("Flaps", "Inboard and outboard flaps on both wings", c.airFlaps, true, p) { c.airFlaps = it }
+            SwitchRow("Ailerons", null, c.airAilerons, true, p) { c.airAilerons = it }
+            SwitchRow(
+                "Follow panel lines on the texture",
+                if (prof.generic) "Always on for unknown types: the lines painted on the wing decide where the cut goes"
+                else "Moves the outlines onto the painted panel lines",
+                c.airTexture || prof.generic, !prof.generic, p,
+            ) { c.airTexture = it }
+            VSpace(8.dp)
+            if (c.airBusy) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(Modifier.size(20.dp), color = p.accent, strokeWidth = 2.5.dp)
+                    Spacer(Modifier.width(10.dp))
+                    Text(c.airStatus ?: "Working…", color = p.text, fontSize = 13.sp)
+                }
+            } else {
+                GradientButton(if (c.airAilerons && !c.airFlaps) "Cut ailerons" else "Cut flaps", Icons.Outlined.ContentCut, p, Modifier.fillMaxWidth()) {
+                    c.cutControlSurfaces()
+                }
+                c.airStatus?.let { VSpace(6.dp); Text(it, color = p.muted, fontSize = 12.sp) }
+            }
+            VSpace(6.dp)
+            Text(
+                "Only the wing between its top and bottom skin is cut — engines, pylons, landing gear and the tail are left alone. " +
+                    "Each surface gets a hinge at its front edge.",
+                color = p.muted, fontSize = 11.sp,
+            )
+        }
     }
 }

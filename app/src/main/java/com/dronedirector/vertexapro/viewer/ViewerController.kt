@@ -553,6 +553,291 @@ class ViewerController(
         view?.requestRender()
     }
 
+    // ---------------------------------------------------------------- aircraft: real size + control surfaces
+    var aircraftType by mutableIntStateOf(0)
+    var airFlaps by mutableStateOf(true)
+    var airAilerons by mutableStateOf(false)
+    var airTexture by mutableStateOf(true)
+    var airBusy by mutableStateOf(false)
+        private set
+    var airStatus by mutableStateOf<String?>(null)
+    data class AirSize(val lengthUnits: Double, val spanUnits: Double, val byLength: Double, val bySpan: Double, val spanName: String)
+    var airSize by mutableStateOf<AirSize?>(null)
+        private set
+    val airProfile get() = AircraftProfiles.all[aircraftType.coerceIn(0, AircraftProfiles.all.size - 1)]
+
+    private class WingData(
+        val len: Int, val vert: Int, val tail: Int, val up: Int, val cS: Double, val half: DoubleArray, val n: Int,
+        val st: Array<Array<DoubleArray>>,
+    )
+
+    /** Model length and span against the chosen aircraft: the scale factor for real size. */
+    fun checkRealSize() {
+        scope.launch {
+            val span = withContext(Dispatchers.Default) { safe { NativeBridge.nativeDetectMirrorAxis(handle) } } ?: return@launch
+            val b = safe { NativeBridge.nativeBounds(handle) } ?: return@launch
+            val o1 = (span + 1) % 3
+            val o2 = (span + 2) % 3
+            val lenAx = if (b[o1] >= b[o2]) o1 else o2
+            val lenU = b[lenAx]
+            val spanU = b[span]
+            val prof = airProfile
+            if (prof.generic || lenU <= 0 || spanU <= 0) { airSize = AirSize(lenU, spanU, 0.0, 0.0, ""); return@launch }
+            val f = prof.lengthM / lenU
+            val (spanName, spanM) = prof.spansM.minBy { kotlin.math.abs(it.second - spanU * f) }
+            airSize = AirSize(lenU, spanU, f, spanM / spanU, spanName)
+        }
+    }
+
+    /** Scales the model so it is the real aircraft's size in metres. */
+    fun applyRealSize(byLength: Boolean) {
+        val s = airSize ?: return
+        val f = if (byLength) s.byLength else s.bySpan
+        scaleModelBy(f, "Now real size: ${airProfile.name}, ${String.format(java.util.Locale.US, "%.2f", airProfile.lengthM)} m long")
+    }
+
+    /** Uses the two measure points: "this distance is X metres". */
+    fun applyMeasuredSize(meters: Double) {
+        val d = measureDelta() ?: run { airStatus = "Place two measure points first."; return }
+        val dist = kotlin.math.sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2])
+        if (dist <= 0 || meters <= 0) return
+        scaleModelBy(meters / dist, "Scaled so the measured distance is ${String.format(java.util.Locale.US, "%.3f", meters)} m")
+    }
+
+    private fun scaleModelBy(f: Double, message: String) {
+        if (!canEdit || !(f > 0) || f.isInfinite()) { airStatus = "This model can't be scaled on this device."; return }
+        airBusy = true
+        scope.launch {
+            val ok = withContext(Dispatchers.Default) { safe { NativeBridge.nativeScaleModel(handle, f) } } ?: false
+            airBusy = false
+            if (!ok) { airStatus = "Couldn't scale the model."; return@launch }
+            val ff = f.toFloat()
+            hinges = hinges.mapValues { (_, h) -> Hinge(FloatArray(3) { h.a[it] * ff }, FloatArray(3) { h.b[it] * ff }, h.deg) }
+            hinges.keys.forEach { applyHinge(it) }
+            for (i in measurePoints.indices) measurePoints[i] = FloatArray(3) { measurePoints[i][it] * ff }
+            unit = 0
+            hasUndo = false
+            hasRedo = false
+            delay(150)
+            refreshStats()
+            rebuildReport()
+            resetView()
+            airStatus = message
+            checkRealSize()
+        }
+    }
+
+    private fun parseWings(r: DoubleArray): WingData? {
+        if (r.size < 8) return null
+        val n = r[7].toInt()
+        if (r.size < 8 + 2 * (n + 1) * 6) return null
+        val st = Array(2) { side -> Array(n + 1) { k -> DoubleArray(6) { j -> r[8 + (side * (n + 1) + k) * 6 + j] } } }
+        return WingData(r[0].toInt(), r[1].toInt(), r[2].toInt(), r[3].toInt(), r[4], doubleArrayOf(r[5], r[6]), n, st)
+    }
+
+    /** Wing at a spanwise share: le, te, vlo, vhi (interpolated between found stations), or null. */
+    private fun wingAt(w: WingData, side: Int, eta: Float): DoubleArray? {
+        val x = eta * w.n
+        val k0 = kotlin.math.floor(x).toInt().coerceIn(1, w.n - 1)
+        val k1 = (k0 + 1).coerceAtMost(w.n - 1)
+        val a = w.st[side][k0]
+        val b = w.st[side][k1]
+        val t = (x - k0).coerceIn(0f, 1f).toDouble()
+        return when {
+            a[1] > 0 && b[1] > 0 -> DoubleArray(4) { j -> a[2 + j] + (b[2 + j] - a[2 + j]) * t }
+            a[1] > 0 -> a.copyOfRange(2, 6)
+            b[1] > 0 -> b.copyOfRange(2, 6)
+            else -> null
+        }
+    }
+
+    private class SectionOutline(val pts: FloatArray, val m: Int, val lo: Float, val hi: Float, val hingeA: FloatArray, val hingeB: FloatArray)
+
+    private fun buildSection(w: WingData, side: Int, sec: Surface): SectionOutline? {
+        val m = 12
+        val half = w.half[side]
+        val s = if (side == 0) 1.0 else -1.0
+        val fronts = ArrayList<FloatArray>()
+        val backs = ArrayList<FloatArray>()
+        var lo = Double.MAX_VALUE
+        var hi = -Double.MAX_VALUE
+        var thick = 0.0
+        fun p(spanC: Double, l: Double, v: Double): FloatArray {
+            val out = FloatArray(3)
+            val span = 3 - w.len - w.vert
+            out[span] = spanC.toFloat(); out[w.len] = l.toFloat(); out[w.vert] = v.toFloat()
+            return out
+        }
+        val spanAxisValue = { eta: Float -> w.cS + s * eta * half }
+        for (i in 0 until m) {
+            val eta = sec.etaStart + (sec.etaEnd - sec.etaStart) * i / (m - 1)
+            val d = wingAt(w, side, eta) ?: return null
+            val chord = kotlin.math.abs(d[1] - d[0])
+            val v = (d[2] + d[3]) / 2
+            fronts += p(spanAxisValue(eta), d[1] - w.tail * sec.chord * chord, v)
+            backs += p(spanAxisValue(eta), d[1] + w.tail * 0.08 * chord, v)
+            lo = minOf(lo, d[2]); hi = maxOf(hi, d[3]); thick = maxOf(thick, d[3] - d[2])
+        }
+        val margin = thick * 0.35 + half * 0.004
+        val flat = FloatArray(m * 6)
+        for (i in 0 until m) System.arraycopy(fronts[i], 0, flat, i * 3, 3)
+        for (i in 0 until m) System.arraycopy(backs[m - 1 - i], 0, flat, (m + i) * 3, 3)
+        return SectionOutline(flat, m, (lo - margin).toFloat(), (hi + margin).toFloat(), fronts.first(), fronts.last())
+    }
+
+    /** Moves the outline onto the panel lines painted on the texture (flat view from above). */
+    private fun followTexture(o: SectionOutline, a: Analysis, range: Float): FloatArray {
+        val scr = safe { NativeBridge.nativeProject(handle, o.pts) } ?: return o.pts
+        if (scr.any { it.isNaN() }) return o.pts
+        val m = o.m
+        fun edgeAt(x: Float, y: Float): Float {
+            val ix = (x / a.img.step).toInt()
+            val iy = (y / a.img.step).toInt()
+            if (ix < 1 || iy < 1 || ix >= a.img.w - 1 || iy >= a.img.h - 1) return 0f
+            return a.edges[iy * a.img.w + ix]
+        }
+        val out = scr.copyOf()
+        // front (hinge) line: search along the chord for the strongest line
+        val shift = FloatArray(m)
+        val ok = BooleanArray(m)
+        for (i in 0 until m) {
+            val fx = scr[i * 2]; val fy = scr[i * 2 + 1]
+            val bi = 2 * m - 1 - i
+            val bx = scr[bi * 2]; val by = scr[bi * 2 + 1]
+            val dx = fx - bx; val dy = fy - by
+            val l = kotlin.math.hypot(dx, dy)
+            if (l < 4) continue
+            val ux = dx / l; val uy = dy / l
+            var best = 0.2f
+            var bt = 0f
+            val steps = (l * range).toInt().coerceAtLeast(2)
+            for (t in -steps..steps) {
+                val e = edgeAt(fx + ux * t, fy + uy * t) + 0.5f * edgeAt(fx + ux * t - uy, fy + uy * t + ux) + 0.5f * edgeAt(fx + ux * t + uy, fy + uy * t - ux)
+                val sc = e / 2f - 0.15f * kotlin.math.abs(t.toFloat()) / steps
+                if (sc > best) { best = sc; bt = t.toFloat(); ok[i] = true }
+            }
+            shift[i] = bt
+        }
+        val found = ok.count { it }
+        if (found >= m / 3) {
+            for (i in 0 until m) {
+                val near = (maxOf(0, i - 1)..minOf(m - 1, i + 1)).filter { ok[it] }.map { shift[it] }.sorted()
+                val sh = if (near.isEmpty()) 0f else near[near.size / 2]
+                val bi = 2 * m - 1 - i
+                val dx = scr[i * 2] - scr[bi * 2]; val dy = scr[i * 2 + 1] - scr[bi * 2 + 1]
+                val l = kotlin.math.hypot(dx, dy).coerceAtLeast(1e-3f)
+                out[i * 2] = scr[i * 2] + dx / l * sh
+                out[i * 2 + 1] = scr[i * 2 + 1] + dy / l * sh
+            }
+        }
+        // the two ends: the chordwise panel line nearest each end
+        val sx = scr[(m - 1) * 2] - scr[0]; val sy = scr[(m - 1) * 2 + 1] - scr[1]
+        val sl = kotlin.math.hypot(sx, sy)
+        if (sl > 8) {
+            val ux = sx / sl; val uy = sy / sl
+            val reach = (sl * 0.12f).toInt().coerceAtLeast(3)
+            for (end in 0..1) {
+                val fi = if (end == 0) 0 else m - 1
+                val bi = 2 * m - 1 - fi
+                var best = 0.18f
+                var bt = 0f
+                for (t in -reach..reach) {
+                    var sum = 0f
+                    for (q in 1..5) {
+                        val px = out[fi * 2] + (scr[bi * 2] - out[fi * 2]) * q / 6f + ux * t
+                        val py = out[fi * 2 + 1] + (scr[bi * 2 + 1] - out[fi * 2 + 1]) * q / 6f + uy * t
+                        sum += edgeAt(px, py)
+                    }
+                    val sc = sum / 5f - 0.1f * kotlin.math.abs(t.toFloat()) / reach
+                    if (sc > best) { best = sc; bt = t.toFloat() }
+                }
+                out[fi * 2] += ux * bt; out[fi * 2 + 1] += uy * bt
+                out[bi * 2] += ux * bt; out[bi * 2 + 1] += uy * bt
+            }
+        }
+        return safe { NativeBridge.nativeUnproject(handle, out) } ?: o.pts
+    }
+
+    /** Cuts the flaps (and ailerons if chosen) on both wings, only between the wing's skins. */
+    fun cutControlSurfaces() {
+        if (!canEdit) { airStatus = "This model is too large to edit on this device."; return }
+        if (!airFlaps && !airAilerons) { airStatus = "Choose flaps and/or ailerons."; return }
+        val prof = airProfile
+        val sections = prof.surfaces.filter { if (it.aileron) airAilerons else airFlaps }
+        val useTexture = airTexture || prof.generic
+        airBusy = true
+        airStatus = "Finding the wings…"
+        scope.launch {
+            try {
+                val spanAx = withContext(Dispatchers.Default) { safe { NativeBridge.nativeDetectMirrorAxis(handle) } } ?: return@launch
+                val raw = withContext(Dispatchers.Default) { safe { NativeBridge.nativeAnalyzeWings(handle, spanAx, 60) } }
+                val w = raw?.let { parseWings(it) }
+                if (w == null || w.st.all { side -> side.count { it[1] > 0 } < 10 }) {
+                    airStatus = "Couldn't find the wings on this model."
+                    return@launch
+                }
+                val displayUp = if (upZ) 2 else 1
+                if (w.vert != displayUp) {
+                    airStatus = "The model isn't standing upright in the view — switch the up axis (Z-up / Y-up) and try again."
+                    return@launch
+                }
+                // look straight down (or up, for a model that is upside down) in flat view
+                if (!ortho) toggleOrtho()
+                val up = if (upZ) w.up else w.up
+                viewPreset(if (up > 0) 0 else 1)
+                autoRotate = false
+                safe { NativeBridge.nativeSetAutoRotate(handle, false) }
+                delay(1000)
+                airStatus = if (useTexture) "Reading the panel lines on the texture…" else "Cutting…"
+                val a = if (useTexture) ensureAnalysis(LIGHT_FLAT) else null
+                // left / right: up × forward points to the left wing
+                val fwd = DoubleArray(3).also { it[w.len] = -w.tail.toDouble() }
+                val upV = DoubleArray(3).also { it[w.vert] = w.up.toDouble() }
+                val leftV = doubleArrayOf(upV[1] * fwd[2] - upV[2] * fwd[1], upV[2] * fwd[0] - upV[0] * fwd[2], upV[0] * fwd[1] - upV[1] * fwd[0])
+                val plusIsLeft = leftV[spanAx] > 0
+                var first = true
+                val made = ArrayList<Pair<Int, String>>()
+                var missed = 0
+                for (side in 0..1) {
+                    val sideName = if ((side == 0) == plusIsLeft) "L" else "R"
+                    for (sec in sections) {
+                        val o = buildSection(w, side, sec)
+                        if (o == null) { missed++; continue }
+                        val pts = if (a != null) followTexture(o, a, if (prof.generic) 0.5f else 0.3f) else o.pts
+                        val name = "${sec.name} $sideName"
+                        airStatus = "Cutting $name…"
+                        val keep = first
+                        val r = withContext(Dispatchers.Default) {
+                            safe { NativeBridge.nativeCut(handle, pts, 3, name, -1, keep, -1, 0f, 1f, null, w.vert, o.lo, o.hi) }
+                        } ?: "ERR|Cancelled"
+                        if (r.startsWith("ERR|")) { missed++; continue }
+                        first = false
+                        val idx = r.substringBefore('|').toIntOrNull() ?: continue
+                        made += idx to name
+                        // hinge along the front edge, so it swings like the real surface and exports with that pivot
+                        hinges = hinges + (idx to Hinge(o.hingeA, o.hingeB, 0f))
+                        applyHinge(idx)
+                    }
+                }
+                if (made.isEmpty()) { airStatus = "Nothing could be cut — check the aircraft type, or use the cut tool."; return@launch }
+                cutCount += made.size
+                hasUndo = true
+                hasRedo = false
+                refreshStats()
+                rebuildReport()
+                selectPart(made.first().first)
+                lastCut = "Created ${made.size} control surfaces (${made.joinToString { it.second }})"
+                airStatus = "Done: ${made.size} parts" + (if (missed > 0) ", $missed couldn't be placed" else "") +
+                    ". Check them, use Edit with brush to touch up, or Undo."
+                view?.requestRender()
+                delay(250)
+                refreshStats()
+            } finally {
+                airBusy = false
+            }
+        }
+    }
+
     // ---------------------------------------------------------------- smart cut tools
     var cutTool by mutableIntStateOf(TOOL_OUTLINE)
         private set
@@ -1654,11 +1939,11 @@ class ViewerController(
         scope.launch {
             val r = withContext(Dispatchers.Default) {
                 fun one(pName: String, mirrorAx: Int, keepUndo: Boolean): String {
-                    if (outlines == null) return safe { NativeBridge.nativeCut(handle, flat, mode, pName, mirrorAx, keepUndo, -1, dLo, dHi, er) } ?: "ERR|Cancelled"
-                    val outer = safe { NativeBridge.nativeCut(handle, outlines.first, mode, "$pName (gap)", mirrorAx, keepUndo, -1, dLo, dHi, er) } ?: "ERR|Cancelled"
+                    if (outlines == null) return safe { NativeBridge.nativeCut(handle, flat, mode, pName, mirrorAx, keepUndo, -1, dLo, dHi, er, -1, 0f, 0f) } ?: "ERR|Cancelled"
+                    val outer = safe { NativeBridge.nativeCut(handle, outlines.first, mode, "$pName (gap)", mirrorAx, keepUndo, -1, dLo, dHi, er, -1, 0f, 0f) } ?: "ERR|Cancelled"
                     if (outer.startsWith("ERR|")) return outer
                     val tmp = outer.substringBefore('|').toIntOrNull() ?: return outer
-                    val inner = safe { NativeBridge.nativeCut(handle, outlines.second, mode, pName, mirrorAx, false, tmp, dLo, dHi, er) } ?: "ERR|Cancelled"
+                    val inner = safe { NativeBridge.nativeCut(handle, outlines.second, mode, pName, mirrorAx, false, tmp, dLo, dHi, er, -1, 0f, 0f) } ?: "ERR|Cancelled"
                     safe { NativeBridge.nativeDeletePart(handle, tmp) }
                     return inner
                 }

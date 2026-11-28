@@ -39,7 +39,7 @@ object NativeBridge {
     @JvmStatic external fun nativeProject(h: Long, pts: FloatArray): FloatArray
     @JvmStatic external fun nativeCut(
         h: Long, pts: FloatArray, mode: Int, name: String, mirrorAxis: Int, keepUndo: Boolean, onlyPart: Int, depthLo: Float, depthHi: Float,
-        erase: FloatArray?,
+        erase: FloatArray?, slabAxis: Int, slabLo: Float, slabHi: Float,
     ): String
     @JvmStatic external fun nativePreviewCut(h: Long, pts: FloatArray?, depthLo: Float, depthHi: Float, erase: FloatArray?, mode: Int, exact: Boolean)
     @JvmStatic external fun nativeBrushSelect(h: Long, x: Float, y: Float, radius: Float, add: Boolean, vertex: Boolean, xray: Boolean): Long
@@ -49,6 +49,8 @@ object NativeBridge {
     @JvmStatic external fun nativeMergeParts(h: Long, a: Int, b: Int, connect: Boolean): LongArray
     @JvmStatic external fun nativeEditPartSelection(h: Long, part: Int): Long
     @JvmStatic external fun nativeApplyPartEdit(h: Long, part: Int): LongArray
+    @JvmStatic external fun nativeAnalyzeWings(h: Long, spanAxis: Int, stations: Int): DoubleArray
+    @JvmStatic external fun nativeScaleModel(h: Long, factor: Double): Boolean
     @JvmStatic external fun nativePartsTouch(h: Long, a: Int, b: Int): Long
     @JvmStatic external fun nativeMirrorPoints(h: Long, pts: FloatArray, axis: Int): FloatArray
     @JvmStatic external fun nativeSetOrtho(h: Long, on: Boolean)

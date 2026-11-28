@@ -310,8 +310,11 @@ JNIEXPORT void JNICALL FN(nativePreviewCut)(JNIEnv* env, jobject, jlong h, jfloa
 
 JNIEXPORT jstring JNICALL FN(nativeCut)(JNIEnv* env, jobject, jlong h, jfloatArray pts, jint mode, jstring name,
                                         jint mirrorAxis, jboolean keepUndo, jint onlyPart, jfloat depthLo, jfloat depthHi,
-                                        jfloatArray erase) {
+                                        jfloatArray erase, jint slabAxis, jfloat slabLo, jfloat slabHi) {
     Renderer::CutRequest req;
+    req.slabAxis = slabAxis;
+    req.slabLo = slabLo;
+    req.slabHi = slabHi;
     req.erase = floats(env, erase);
     req.onlyPart = onlyPart;
     req.depthLo = depthLo;
@@ -537,6 +540,16 @@ JNIEXPORT jlongArray JNICALL FN(nativeApplyPartEdit)(JNIEnv* env, jobject, jlong
     jlongArray arr = env->NewLongArray(3);
     env->SetLongArrayRegion(arr, 0, 3, v);
     return arr;
+}
+JNIEXPORT jdoubleArray JNICALL FN(nativeAnalyzeWings)(JNIEnv* env, jobject, jlong h, jint span, jint n) {
+    std::vector<double> v = E(h)->renderer.analyzeWings(span, n);
+    jdoubleArray a = env->NewDoubleArray((jsize)v.size());
+    if (!v.empty()) env->SetDoubleArrayRegion(a, 0, (jsize)v.size(), v.data());
+    return a;
+}
+JNIEXPORT jboolean JNICALL FN(nativeScaleModel)(JNIEnv*, jobject, jlong h, jdouble f) {
+    auto s = E(h)->sink();
+    return E(h)->renderer.scaleModel(f, s.get()) ? JNI_TRUE : JNI_FALSE;
 }
 JNIEXPORT jlong JNICALL FN(nativePartsTouch)(JNIEnv*, jobject, jlong h, jint a, jint b) { return E(h)->renderer.partsTouch(a, b); }
 JNIEXPORT jfloatArray JNICALL FN(nativeMirrorPoints)(JNIEnv* env, jobject, jlong h, jfloatArray pts, jint ax) {

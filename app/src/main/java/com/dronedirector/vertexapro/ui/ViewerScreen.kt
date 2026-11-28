@@ -51,6 +51,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Flight
 import androidx.compose.material.icons.automirrored.outlined.Redo
 import androidx.compose.material.icons.automirrored.outlined.Undo
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
@@ -220,6 +221,9 @@ fun ViewerScreen(
                 toggle(Panel.PARTS)
                 // a model that is one single mesh is split into its loose pieces automatically
                 if (panel == Panel.PARTS && c.parts.size <= 1 && c.canSplit && !c.splitLoose && !c.hasUndo) c.updateSplit(true)
+            }
+            if (c.canEdit) RoundIconButton(Icons.Outlined.Flight, p, active = panel == Panel.AIRCRAFT, size = btn, contentDescription = "Aircraft") {
+                toggle(Panel.AIRCRAFT)
             }
             RailDivider(p)
             RailLabel("VIEW", p)
@@ -399,6 +403,7 @@ fun ViewerScreen(
             val close = { panel = Panel.NONE }
             when (panel) {
                 Panel.PARTS -> PartsPanel(c, p, close)
+                Panel.AIRCRAFT -> AircraftPanel(c, p, close)
                 Panel.LIGHT -> LightingPanel(c, p, close)
                 Panel.POINTS -> PointsPanel(c, p, close)
                 Panel.CAPTURE -> CapturePanel(c, p, close)

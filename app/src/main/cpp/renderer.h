@@ -60,7 +60,9 @@ public:
         int onlyPart = -1;          // >= 0: cut only this part
         float depthLo = 0.f, depthHi = 1.f;  // part of the model's depth (front 0 → back 1) the cut may reach
         std::vector<float> erase;            // spheres (x, y, z, radius) painted out of the cut
-        bool previewOnly = false;   // exact preview: compute the cut and show it, change nothing
+        bool previewOnly = false;
+        int slabAxis = -1;          // >= 0: only take what lies between slabLo and slabHi on this axis
+        float slabLo = 0, slabHi = 0;   // exact preview: compute the cut and show it, change nothing
         bool keepUndo = true;       // false for the second half of a mirrored cut (undo covers both)
     };
     struct CutResult {
@@ -103,6 +105,10 @@ public:
     bool mergeParts(int a, int b, bool connect, Sink* sink, int64_t& sealsRemoved, int64_t& welded);
     /** Number of vertex positions the two parts share (> 0: they touch). */
     int64_t partsTouch(int a, int b);
+    /** Wing sections across the span (see cutter.cpp for the layout). */
+    std::vector<double> analyzeWings(int spanAxis, int stations);
+    /** Scales the whole model (and its origin) by f, e.g. to real-world size. */
+    bool scaleModel(double f, Sink* sink);
     /** Starts brushing a finished part: all its triangles become the selection. Returns the count. */
     int64_t editPartSelection(int part);
     /** Applies the brush edit: unselected triangles go back to the part they were cut from, newly

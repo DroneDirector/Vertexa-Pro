@@ -176,6 +176,12 @@ public:
         std::lock_guard<std::mutex> lk(m_);
         return bounds_;
     }
+    /** After the geometry was scaled by f: bounds, part bounds and origin follow. */
+    void scaleAll(double f) {
+        std::lock_guard<std::mutex> lk(m_);
+        for (int i = 0; i < 3; i++) { bounds_.mn[i] *= f; bounds_.mx[i] *= f; origin[i] *= f; }
+        generation++;
+    }
     int addMaterial(const Material& mat) {
         std::lock_guard<std::mutex> lk(m_);
         materials_.push_back(mat);

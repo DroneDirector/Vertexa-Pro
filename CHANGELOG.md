@@ -2,6 +2,11 @@
 
 ## Next
 
+- New Aircraft tool (plane button on the right): pick the type — Airbus A320ceo, A320neo, A321ceo, A321neo, Boeing 737-800, 737 MAX 8, ATR 72-600, or Other
+- Real size: scales the model to the real aircraft in metres (by length or by wingspan, with a proportions check), or set it from a measured distance
+- Cut flaps (and ailerons if wanted) on both wings in one go: the app finds the wings, places smooth outlines at the real-world positions and cuts only between the wing's top and bottom skin — engines, pylons, landing gear and tail are left alone. Each surface gets a hinge at its front edge, named L / R
+- Follow panel lines on the texture: the outlines move onto the panel lines painted on the wing; for unknown types the texture decides where the flaps go
+
 - Undo and Redo are always in the bottom menu: while drawing an outline they step through the points, otherwise through cuts and edits
 
 ## 1.0.19

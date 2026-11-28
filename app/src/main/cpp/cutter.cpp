@@ -598,6 +598,7 @@ Renderer::CutResult Renderer::cut(const CutRequest& req, Sink* sink) {
     };
     auto inDepth = [&](const float* p) {
         if (erased(p)) return false;
+        if (R.slabAxis >= 0 && R.slabAxis < 3 && (p[R.slabAxis] < R.slabLo || p[R.slabAxis] > R.slabHi)) return false;
         if (!limitDepth) return true;
         double d = (V3(p[0], p[1], p[2]) - cc.eye).dot(cc.fwd);
         return d >= dLo && d <= dHi;
@@ -1589,6 +1590,233 @@ bool Renderer::applyPartEdit(int part, Sink* sink, int64_t& out, int64_t& in) {
     rebuildGpu_ = true;
     recomputeParts(sink);
     sink->log(0, "Brush edit: " + std::to_string(out) + " triangles taken off the part, " + std::to_string(in) + " added.");
+    return true;
+}
+
+// ======================================================================== aircraft tools
+// Finds the wings by slicing the model across the span: for every station the wing is the section
+// that continues the one found at ~60 % of the half-span (where there is nothing but wing), so
+// engines, gear and tailplane are left out. Output layout (doubles):
+//   lenAxis, vertAxis, tailSign, upSign, spanCenter, halfPos, halfNeg, N,
+//   then for side +1 and side -1, N+1 stations each: eta, found, Lle, Lte, vlo, vhi
+std::vector<double> Renderer::analyzeWings(int span, int N) {
+    std::vector<double> out;
+    Bounds b;
+    std::vector<uint8_t> hidden;
+    {
+        std::lock_guard<std::mutex> l(mu_);
+        b = bounds_;
+        hidden = hidden_;
+    }
+    if (!b.valid() || span < 0 || span > 2 || N < 8) return out;
+    int o1 = (span + 1) % 3, o2 = (span + 2) % 3;
+    int len = (b.mx[o1] - b.mn[o1]) >= (b.mx[o2] - b.mn[o2]) ? o1 : o2;
+    int vert = len == o1 ? o2 : o1;
+    double cS = (b.mn[span] + b.mx[span]) / 2;
+    double halfP = b.mx[span] - cS, halfN = cS - b.mn[span];
+    double Lmn = b.mn[len], Lmx = b.mx[len], Llen = Lmx - Lmn;
+    std::lock_guard<std::mutex> dl(dataMu_);
+    if (cpu_.empty()) return out;
+    auto visible = [&](const Chunk& c) {
+        return !c.points && !c.tris.empty() && !(c.part >= 0 && c.part < (int)hidden.size() && hidden[c.part]);
+    };
+    // tail: the end with the tall fin; up: the side the fin points to
+    double hiMin = 1e300, hiMax = -1e300, loMin = 1e300, loMax = -1e300, fusSum = 0;
+    int64_t fusN = 0;
+    for (auto& cp : cpu_) {
+        if (!visible(*cp)) continue;
+        for (auto& v : cp->verts) {
+            double L = v.p[len], V = v.p[vert];
+            if (L > Lmx - 0.15 * Llen) { hiMin = std::min(hiMin, V); hiMax = std::max(hiMax, V); }
+            if (L < Lmn + 0.15 * Llen) { loMin = std::min(loMin, V); loMax = std::max(loMax, V); }
+            if (std::fabs(v.p[span] - cS) < 0.04 * std::max(halfP, halfN)) { fusSum += V; fusN++; }
+        }
+    }
+    int tailSign = (hiMax - hiMin) >= (loMax - loMin) ? 1 : -1;
+    double vFus = fusN ? fusSum / fusN : (b.mn[vert] + b.mx[vert]) / 2;
+    double tMin = tailSign > 0 ? hiMin : loMin, tMax = tailSign > 0 ? hiMax : loMax;
+    int upSign = (tMax - vFus) >= (vFus - tMin) ? 1 : -1;
+
+    // slices: points (L, V) where triangles cross each station plane
+    std::vector<std::vector<std::pair<double, double>>> pts[2];
+    pts[0].resize(N + 1);
+    pts[1].resize(N + 1);
+    for (auto& cp : cpu_) {
+        const Chunk& c = *cp;
+        if (!visible(c)) continue;
+        for (size_t t = 0; t + 2 < c.tris.size(); t += 3) {
+            const float* P[3] = {c.verts[c.tris[t]].p, c.verts[c.tris[t + 1]].p, c.verts[c.tris[t + 2]].p};
+            double smin = std::min({P[0][span], P[1][span], P[2][span]}), smax = std::max({P[0][span], P[1][span], P[2][span]});
+            for (int side = 0; side < 2; side++) {
+                double half = side == 0 ? halfP : halfN;
+                if (half <= 0) continue;
+                double s = side == 0 ? 1.0 : -1.0;
+                // eta range covered by this triangle
+                double e0 = (smin - cS) * s / half, e1 = (smax - cS) * s / half;
+                if (e0 > e1) std::swap(e0, e1);
+                int k0 = std::max(1, (int)std::ceil(e0 * N)), k1 = std::min(N - 1, (int)std::floor(e1 * N));
+                for (int k = k0; k <= k1; k++) {
+                    double y = cS + s * half * k / N;
+                    for (int e = 0; e < 3; e++) {
+                        const float* A = P[e];
+                        const float* B = P[(e + 1) % 3];
+                        double da = A[span] - y, db = B[span] - y;
+                        if ((da < 0) == (db < 0) || da == db) continue;
+                        double tt = da / (da - db);
+                        pts[side][k].push_back({A[len] + (B[len] - A[len]) * tt, A[vert] + (B[vert] - A[vert]) * tt});
+                    }
+                }
+            }
+        }
+    }
+    out = {(double)len, (double)vert, (double)tailSign, (double)upSign, cS, halfP, halfN, (double)N};
+    for (int side = 0; side < 2; side++) {
+        double half = side == 0 ? halfP : halfN;
+        double cell = std::max(half, 1e-9) * 0.012;
+        struct Cl { double l0 = 1e300, l1 = -1e300, v0 = 1e300, v1 = -1e300; std::vector<int> idx; };
+        auto clusters = [&](const std::vector<std::pair<double, double>>& P) {
+            std::unordered_map<int64_t, int> grid;
+            auto key = [&](int64_t gx, int64_t gy) { return ((gx + (1LL << 20)) << 21) | (gy + (1LL << 20)); };
+            std::vector<int64_t> gk(P.size());
+            for (size_t i = 0; i < P.size(); i++) {
+                int64_t gx = (int64_t)std::floor(P[i].first / cell), gy = (int64_t)std::floor(P[i].second / cell);
+                gk[i] = key(gx, gy);
+                grid.emplace(gk[i], -1);
+            }
+            int nc = 0;
+            std::unordered_map<int64_t, int> label;
+            for (auto& kv : grid) {
+                if (label.count(kv.first)) continue;
+                std::vector<int64_t> stack{kv.first};
+                label[kv.first] = nc;
+                while (!stack.empty()) {
+                    int64_t k = stack.back();
+                    stack.pop_back();
+                    int64_t gx = (k >> 21) - (1LL << 20);
+                    int64_t gy = (k & ((1LL << 21) - 1)) - (1LL << 20);
+                    for (int dx = -1; dx <= 1; dx++)
+                        for (int dy = -1; dy <= 1; dy++) {
+                            int64_t nk = key(gx + dx, gy + dy);
+                            if (grid.count(nk) && !label.count(nk)) { label[nk] = nc; stack.push_back(nk); }
+                        }
+                }
+                nc++;
+            }
+            std::vector<Cl> cl(nc);
+            for (size_t i = 0; i < P.size(); i++) {
+                Cl& c = cl[label[gk[i]]];
+                c.l0 = std::min(c.l0, P[i].first); c.l1 = std::max(c.l1, P[i].first);
+                c.v0 = std::min(c.v0, P[i].second); c.v1 = std::max(c.v1, P[i].second);
+                c.idx.push_back((int)i);
+            }
+            return cl;
+        };
+        struct St { bool found = false; double le = 0, te = 0, vlo = 0, vhi = 0; };
+        std::vector<St> st(N + 1);
+        auto measure = [&](const std::vector<std::pair<double, double>>& P, const Cl& c, St& s) {
+            double le = tailSign > 0 ? c.l0 : c.l1, te = tailSign > 0 ? c.l1 : c.l0;
+            double chord = std::fabs(te - le);
+            if (chord <= 0) return;
+            // skin band near the trailing edge: the dense run of heights around the median
+            std::vector<double> vs;
+            for (int i : c.idx) if (std::fabs(P[i].first - te) < 0.4 * chord) vs.push_back(P[i].second);
+            if (vs.size() < 2) return;
+            std::sort(vs.begin(), vs.end());
+            size_t m = vs.size() / 2, lo = m, hi = m;
+            double gap = 0.03 * chord + cell * 0.5;
+            while (lo > 0 && vs[lo] - vs[lo - 1] < gap) lo--;
+            while (hi + 1 < vs.size() && vs[hi + 1] - vs[hi] < gap) hi++;
+            s.vlo = vs[lo];
+            s.vhi = vs[hi];
+            // trailing edge measured on the skin only (fairings below don't count)
+            double teSkin = le;
+            for (int i : c.idx) {
+                if (P[i].second < s.vlo - gap || P[i].second > s.vhi + gap) continue;
+                teSkin = tailSign > 0 ? std::max(teSkin, P[i].first) : std::min(teSkin, P[i].first);
+            }
+            s.le = le;
+            s.te = teSkin;
+            s.found = true;
+        };
+        int k0 = (int)std::lround(0.6 * N);
+        auto cl0 = clusters(pts[side][k0]);
+        int best = -1;
+        double bestChord = 0;
+        for (size_t i = 0; i < cl0.size(); i++)
+            if (cl0[i].l1 - cl0[i].l0 > bestChord) { bestChord = cl0[i].l1 - cl0[i].l0; best = (int)i; }
+        if (best >= 0) {
+            measure(pts[side][k0], cl0[best], st[k0]);
+            for (int dir = -1; dir <= 1; dir += 2) {
+                St ref = st[k0];
+                for (int k = k0 + dir; k >= 1 && k <= N - 1; k += dir) {
+                    if (dir < 0 && (double)k / N < 0.07) break;
+                    auto cl = clusters(pts[side][k]);
+                    int bi = -1;
+                    double bs = 0;
+                    double rl0 = std::min(ref.le, ref.te), rl1 = std::max(ref.le, ref.te);
+                    double rv = (ref.vlo + ref.vhi) / 2;
+                    for (size_t i = 0; i < cl.size(); i++) {
+                        double ov = std::min(cl[i].l1, rl1) - std::max(cl[i].l0, rl0);
+                        if (ov <= 0) continue;
+                        double dv = (rv < cl[i].v0) ? cl[i].v0 - rv : (rv > cl[i].v1 ? rv - cl[i].v1 : 0);
+                        double sc = ov - dv * 2;
+                        if (sc > bs) { bs = sc; bi = (int)i; }
+                    }
+                    if (bi < 0) continue;
+                    measure(pts[side][k], cl[bi], st[k]);
+                    if (st[k].found) ref = st[k];
+                }
+            }
+        }
+        // smooth out engines / fairings: median of 5 for chord and trailing edge
+        std::vector<St> sm = st;
+        for (int k = 1; k < N; k++) {
+            if (!st[k].found) continue;
+            std::vector<double> ch, te;
+            for (int j = std::max(1, k - 2); j <= std::min(N - 1, k + 2); j++)
+                if (st[j].found) { ch.push_back(std::fabs(st[j].te - st[j].le)); te.push_back(st[j].te); }
+            std::sort(ch.begin(), ch.end());
+            std::sort(te.begin(), te.end());
+            double c = ch[ch.size() / 2];
+            sm[k].te = te[te.size() / 2];
+            sm[k].le = sm[k].te - tailSign * c;
+        }
+        for (int k = 0; k <= N; k++) {
+            const St& s = sm[k];
+            out.insert(out.end(), {(double)k / N, s.found ? 1.0 : 0.0, s.le, s.te, s.vlo, s.vhi});
+        }
+    }
+    return out;
+}
+
+bool Renderer::scaleModel(double f, Sink* sink) {
+    if (!sink || !(f > 0) || !std::isfinite(f)) return false;
+    {
+        std::lock_guard<std::mutex> dl(dataMu_);
+        if (!keepCpu_ || cpu_.empty()) return false;
+        std::vector<std::shared_ptr<Chunk>> result;
+        for (auto& c : cpu_) {
+            auto n = std::make_shared<Chunk>(*c);
+            for (auto& v : n->verts) { v.p[0] = (float)(v.p[0] * f); v.p[1] = (float)(v.p[1] * f); v.p[2] = (float)(v.p[2] * f); }
+            result.push_back(n);
+        }
+        cpu_.swap(result);
+        undo_.clear();
+        redo_.clear();
+        tsel_.clear();
+        vsel_.clear();
+        preview_.clear();
+        previewDirty_ = true;
+        pmVerts_.clear();
+        pmDirty_ = true;
+        rebuildGpu_ = true;
+        recomputeParts(sink);
+    }
+    sink->scaleAll(f);
+    {
+        std::lock_guard<std::mutex> l(mu_);
+        bounds_ = sink->bounds();
+    }
     return true;
 }
 
