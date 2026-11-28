@@ -274,8 +274,18 @@ JNIEXPORT jstring JNICALL FN(nativeExportGlb)(JNIEnv* env, jobject, jlong h, jin
     return env->NewStringUTF(safeUtf8(err).c_str());
 }
 
-JNIEXPORT void JNICALL FN(nativePreviewCut)(JNIEnv* env, jobject, jlong h, jfloatArray pts, jfloat lo, jfloat hi) {
+static std::vector<float> floats(JNIEnv* env, jfloatArray a) {
+    std::vector<float> v;
+    if (!a) return v;
+    jsize n = env->GetArrayLength(a);
+    v.resize(n);
+    if (n) env->GetFloatArrayRegion(a, 0, n, v.data());
+    return v;
+}
+
+JNIEXPORT void JNICALL FN(nativePreviewCut)(JNIEnv* env, jobject, jlong h, jfloatArray pts, jfloat lo, jfloat hi, jfloatArray erase) {
     Renderer::CutRequest req;
+    req.erase = floats(env, erase);
     if (pts) {
         jsize n = env->GetArrayLength(pts);
         req.points.resize(n);
@@ -287,8 +297,10 @@ JNIEXPORT void JNICALL FN(nativePreviewCut)(JNIEnv* env, jobject, jlong h, jfloa
 }
 
 JNIEXPORT jstring JNICALL FN(nativeCut)(JNIEnv* env, jobject, jlong h, jfloatArray pts, jint mode, jstring name,
-                                        jint mirrorAxis, jboolean keepUndo, jint onlyPart, jfloat depthLo, jfloat depthHi) {
+                                        jint mirrorAxis, jboolean keepUndo, jint onlyPart, jfloat depthLo, jfloat depthHi,
+                                        jfloatArray erase) {
     Renderer::CutRequest req;
+    req.erase = floats(env, erase);
     req.onlyPart = onlyPart;
     req.depthLo = depthLo;
     req.depthHi = depthHi;
@@ -479,6 +491,21 @@ JNIEXPORT jboolean JNICALL FN(nativeSnapshot)(JNIEnv* env, jobject, jlong h, jin
     auto* out = (uint8_t*)env->GetDirectBufferAddress(buffer);
     if (!out || env->GetDirectBufferCapacity(buffer) < (jlong)w * hh * 4) return JNI_FALSE;
     return E(h)->renderer.snapshot(w, hh, transparent, out) ? JNI_TRUE : JNI_FALSE;
+}
+JNIEXPORT jfloatArray JNICALL FN(nativeMirrorPoints)(JNIEnv* env, jobject, jlong h, jfloatArray pts, jint ax) {
+    std::vector<float> p = floats(env, pts);
+    if (ax >= 0 && ax < 3) {
+        double c = E(h)->renderer.mirrorCenter(ax);
+        for (size_t i = 0; i + 2 < p.size(); i += 3) p[i + ax] = (float)(2 * c - p[i + ax]);
+    }
+    jfloatArray a = env->NewFloatArray((jsize)p.size());
+    if (!p.empty()) env->SetFloatArrayRegion(a, 0, (jsize)p.size(), p.data());
+    return a;
+}
+JNIEXPORT jboolean JNICALL FN(nativeAnalysisImage)(JNIEnv* env, jobject, jlong h, jint w, jint hh, jint lighting, jobject buffer) {
+    auto* out = (uint8_t*)env->GetDirectBufferAddress(buffer);
+    if (!out || env->GetDirectBufferCapacity(buffer) < (jlong)w * hh * 4) return JNI_FALSE;
+    return E(h)->renderer.snapshot(w, hh, true, out, lighting) ? JNI_TRUE : JNI_FALSE;
 }
 JNIEXPORT void JNICALL FN(nativeBeginTurntable)(JNIEnv*, jobject, jlong h) { E(h)->renderer.beginTurntable(); }
 JNIEXPORT void JNICALL FN(nativeTurntableFrame)(JNIEnv*, jobject, jlong h, jdouble a, jint w, jint hh) {

@@ -877,7 +877,7 @@ void Renderer::renderScene(const Frame& f, int w, int h, bool background, bool a
         glDisable(GL_BLEND);
     }
     // cut preview: what the pending cut would take, in orange on top
-    if (!previewCount_.empty() && previewCount_.size() == gpu_.size()) {
+    if (!f.noOverlay && !previewCount_.empty() && previewCount_.size() == gpu_.size()) {
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         glEnable(GL_POLYGON_OFFSET_FILL);
@@ -1039,12 +1039,19 @@ void Renderer::renderPick(const Frame& f, int x, int y) {
 
 // ---------------------------------------------------------------- capture
 
-bool Renderer::snapshot(int w, int h, bool transparent, uint8_t* out) {
+bool Renderer::snapshot(int w, int h, bool transparent, uint8_t* out, int analysisLighting) {
     Frame f;
     {
         std::lock_guard<std::mutex> l(mu_);
         f = frameState();
         f.selected = -1;
+    }
+    if (analysisLighting >= 0) {
+        // image for the smart cut tools: textures visible, chosen lighting, nothing drawn on top
+        f.mode = MODE_TEXTURED;
+        f.lighting = analysisLighting;
+        f.noOverlay = true;
+        f.grid = false;
     }
     GLuint fbo = 0, color = 0, depth = 0;
     glGenFramebuffers(1, &fbo);

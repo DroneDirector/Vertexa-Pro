@@ -358,8 +358,9 @@ fun ViewerScreen(
         // ---------------- cut tool
         AnimatedVisibility(
             c.cutActive, enter = fadeIn() + slideInVertically { -it }, exit = fadeOut(),
-            modifier = Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 66.dp),
+            modifier = Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(start = 66.dp, end = 66.dp, top = 8.dp),
         ) { CutToolbar(c, p) }
+        if (c.cutActive) CutLoupe(c, p)
         AnimatedVisibility(
             c.measureActive, enter = fadeIn() + slideInVertically { -it }, exit = fadeOut(),
             modifier = Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 66.dp),
@@ -408,6 +409,7 @@ fun ViewerScreen(
 
         if (c.askConnect) ConnectPrompt(c, p)
         if (c.createPartOpen) CreatePartCard(c, p)
+        if (c.askAiDownload || c.aiDownload != null) AiDownloadCard(c, p)
         renaming?.let { idx ->
             val current = c.parts.firstOrNull { it.index == idx }?.name ?: ""
             RenameDialog(current, p) { newName -> if (newName != null) c.renamePart(idx, newName); renaming = null }

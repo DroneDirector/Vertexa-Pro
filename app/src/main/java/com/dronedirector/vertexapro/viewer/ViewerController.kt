@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.net.Uri
 import android.opengl.GLES30
 import android.opengl.GLUtils
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -495,6 +496,7 @@ class ViewerController(
 
     fun onDrawFrame(): Boolean {
         val more = safe { NativeBridge.nativeDraw(handle, System.nanoTime()) } ?: return false
+        loupeReq?.let { r -> captureLoupe(r) }
         if (captureRequested && surfaceW > 0 && surfaceH > 0) {
             captureRequested = false
             val side = minOf(surfaceW, surfaceH)
@@ -551,10 +553,375 @@ class ViewerController(
         view?.requestRender()
     }
 
+    // ---------------------------------------------------------------- smart cut tools
+    var cutTool by mutableIntStateOf(TOOL_OUTLINE)
+        private set
+    /** Erase brush: spheres (x, y, z, radius) that the cut never takes. */
+    val eraseSpots = androidx.compose.runtime.mutableStateListOf<FloatArray>()
+    private val cutPrefs = context.getSharedPreferences("cut_tools", Context.MODE_PRIVATE)
+    var eraseBrushDp by mutableFloatStateOf(cutPrefs.getFloat("brush", 28f))
+        private set
+    var loupeZoom by mutableFloatStateOf(cutPrefs.getFloat("zoom", 3f))
+        private set
+    var lineSnap by mutableStateOf(false)
+    var linesOnly by mutableStateOf(false)
+        private set
+    var wandTolerance by mutableFloatStateOf(cutPrefs.getFloat("wand", 0.35f))
+        private set
+    /** AI points of the current selection: x, y (screen), label 1 include / 0 exclude. */
+    val aiPoints = androidx.compose.runtime.mutableStateListOf<Triple<Float, Float, Int>>()
+    var aiExclude by mutableStateOf(false)
+    var aiBusy by mutableStateOf(false)
+        private set
+    var aiDownload by mutableStateOf<Float?>(null)
+        private set
+    var askAiDownload by mutableStateOf(false)
+    var smartBusy by mutableStateOf(false)
+        private set
+    private var lastOutline: FloatArray? = null
+    val hasLastOutline get() = lastOutline != null
+
+    private class Analysis(val cam: List<Double>, val lighting: Int, val img: ViewImage, val edges: FloatArray)
+    private var analysis: Analysis? = null
+    private var samEmbedding: Pair<List<Double>, Sam.Embedding>? = null
+
+    // magnifier while dragging / erasing
+    private class LoupeReq(val x: Float, val y: Float, val side: Int)
+    @Volatile private var loupeReq: LoupeReq? = null
+    var loupeImage by mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null)
+        private set
+    var loupeAt by mutableStateOf<androidx.compose.ui.geometry.Offset?>(null)
+        private set
+    /** Side of the magnifier window in pixels: about 3 cm on the screen. */
+    val loupeSizePx: Int get() = (context.resources.displayMetrics.xdpi * 3f / 2.54f).toInt().coerceIn(160, 700)
+
+    fun chooseCutTool(t: Int) {
+        cutTool = if (cutTool == t && t != TOOL_OUTLINE) TOOL_OUTLINE else t
+        cutHint = when (cutTool) {
+            TOOL_ERASE -> "Paint over areas the cut must leave alone. Two fingers move the view."
+            TOOL_WAND -> "Tap inside a painted panel — the outline follows its lines."
+            TOOL_AI -> "Tap the flap or panel you want. Tap again to add, switch to Remove to exclude."
+            else -> shapeHint(cutShape)
+        }
+        if (cutTool == TOOL_AI) aiPoints.clear()
+    }
+
+    private fun shapeHint(s: Int) = com.dronedirector.vertexapro.ui.shapeHint(s)
+
+    fun updateBrush(dp: Float) { eraseBrushDp = dp; cutPrefs.edit().putFloat("brush", dp).apply() }
+    fun updateLoupeZoom(z: Float) { loupeZoom = z; cutPrefs.edit().putFloat("zoom", z).apply() }
+    fun updateWandTolerance(t: Float) { wandTolerance = t; cutPrefs.edit().putFloat("wand", t).apply() }
+    fun toggleLinesOnly() { linesOnly = !linesOnly; schedulePreview(); view?.requestRender() }
+
+    private fun resetSmart() {
+        cutTool = TOOL_OUTLINE
+        eraseSpots.clear()
+        aiPoints.clear()
+        lineSnap = false
+        linesOnly = false
+        samEmbedding = null
+        analysis = null
+        hideLoupe()
+    }
+
+    private fun eraseArray(): FloatArray? {
+        if (eraseSpots.isEmpty()) return null
+        val out = FloatArray(eraseSpots.size * 4)
+        eraseSpots.forEachIndexed { i, e -> System.arraycopy(e, 0, out, i * 4, 4) }
+        return out
+    }
+
+    /** True while one finger paints with the erase brush. */
+    fun isPaintMode() = cutActive && cutTool == TOOL_ERASE && !askConnect && !createPartOpen && !cutBusy
+
+    private var eraseBusy = false
+    private var eraseStroke = false
+
+    fun erasePaint(x: Float, y: Float, tap: Boolean = false) {
+        showLoupe(x, y)
+        if (eraseBusy) return
+        val density = context.resources.displayMetrics.density
+        // spots closer than a third of the brush are skipped so strokes stay light
+        val pr = projectEraseSpots()
+        for (i in 0 until pr.size / 3) if (!pr[i * 3].isNaN() && kotlin.math.hypot(pr[i * 3] - x, pr[i * 3 + 1] - y) < eraseBrushDp * density / 3) return
+        eraseBusy = true
+        scope.launch {
+            val hit = withContext(Dispatchers.Default) { safe { NativeBridge.nativeRaycast(handle, x, y) } }
+            val ppu = safe { NativeBridge.nativePixelsPerUnit(handle) } ?: 0.0
+            eraseBusy = false
+            if (hit == null || ppu <= 0) { if (tap) cutHint = "Paint on the model itself."; return@launch }
+            if (!eraseStroke) { pushOutlineHistory(); eraseStroke = true }
+            eraseSpots.add(floatArrayOf(hit[0], hit[1], hit[2], (eraseBrushDp * density / ppu).toFloat()))
+            if (tap) eraseStroke = false
+            schedulePreview()
+            view?.requestRender()
+        }
+    }
+
+    fun eraseEnd() {
+        eraseStroke = false
+        hideLoupe()
+        schedulePreview()
+    }
+
+    fun clearErase() {
+        if (eraseSpots.isEmpty()) return
+        pushOutlineHistory()
+        eraseSpots.clear()
+        schedulePreview()
+    }
+
+    /** Erase spots on screen: x, y, radius in pixels (NaN when behind the camera). */
+    fun projectEraseSpots(): FloatArray {
+        if (eraseSpots.isEmpty()) return FloatArray(0)
+        val flat = FloatArray(eraseSpots.size * 3)
+        eraseSpots.forEachIndexed { i, e -> System.arraycopy(e, 0, flat, i * 3, 3) }
+        val pr = safe { NativeBridge.nativeProject(handle, flat) } ?: return FloatArray(0)
+        val ppu = (safe { NativeBridge.nativePixelsPerUnit(handle) } ?: 0.0).toFloat()
+        val out = FloatArray(eraseSpots.size * 3)
+        for (i in eraseSpots.indices) {
+            out[i * 3] = pr.getOrElse(i * 2) { Float.NaN }
+            out[i * 3 + 1] = pr.getOrElse(i * 2 + 1) { Float.NaN }
+            out[i * 3 + 2] = eraseSpots[i][3] * ppu
+        }
+        return out
+    }
+
+    // ---- magnifier
+    private fun showLoupe(x: Float, y: Float) {
+        val side = (loupeSizePx / loupeZoom).toInt().coerceAtLeast(16)
+        loupeReq = LoupeReq(x, y, side)
+        loupeAt = androidx.compose.ui.geometry.Offset(x, y)
+        view?.requestRender()
+    }
+
+    private fun hideLoupe() {
+        loupeReq = null
+        loupeAt = null
+        loupeImage = null
+    }
+
+    /** GL thread: copies the pixels around the finger for the magnifier. */
+    private fun captureLoupe(r: LoupeReq) {
+        if (surfaceW <= 0 || surfaceH <= 0) return
+        val s = r.side.coerceAtMost(minOf(surfaceW, surfaceH))
+        val x0 = (r.x.toInt() - s / 2).coerceIn(0, surfaceW - s)
+        val y0 = (surfaceH - r.y.toInt() - s / 2).coerceIn(0, surfaceH - s)
+        val buf = java.nio.ByteBuffer.allocateDirect(s * s * 4).order(java.nio.ByteOrder.nativeOrder())
+        GLES30.glReadPixels(x0, y0, s, s, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, buf)
+        val px = IntArray(s * s)
+        for (yy in 0 until s) {
+            val row = (s - 1 - yy) * s * 4
+            for (xx in 0 until s) {
+                val o = row + xx * 4
+                px[yy * s + xx] = (0xFF shl 24) or ((buf.get(o).toInt() and 255) shl 16) or
+                    ((buf.get(o + 1).toInt() and 255) shl 8) or (buf.get(o + 2).toInt() and 255)
+            }
+        }
+        val bmp = Bitmap.createBitmap(px, s, s, Bitmap.Config.ARGB_8888).asImageBitmap()
+        // screen position of the magnified area's top-left corner, for drawing the outline over it
+        val left = x0.toFloat()
+        val top = (surfaceH - y0 - s).toFloat()
+        view?.post {
+            if (loupeReq != null) { loupeImage = bmp; loupeOrigin = androidx.compose.ui.geometry.Offset(left, top); loupeSide = s }
+        }
+    }
+    var loupeOrigin by mutableStateOf(androidx.compose.ui.geometry.Offset.Zero)
+        private set
+    var loupeSide by mutableIntStateOf(1)
+        private set
+
+    // ---- analysis image (what the camera sees, textures on, nothing drawn over it)
+    private suspend fun ensureAnalysis(lighting: Int): Analysis? {
+        val cam = safe { NativeBridge.nativeGetCamera(handle) }?.toList() ?: return null
+        analysis?.let { if (it.cam == cam && it.lighting == lighting) return it }
+        val v = view ?: return null
+        val w = surfaceW / 2
+        val h = surfaceH / 2
+        if (w < 8 || h < 8) return null
+        val buf = java.nio.ByteBuffer.allocateDirect(w * h * 4).order(java.nio.ByteOrder.nativeOrder())
+        val done = kotlinx.coroutines.CompletableDeferred<Boolean>()
+        v.queueEvent { done.complete(safe { NativeBridge.nativeAnalysisImage(handle, w, h, lighting, buf) } == true) }
+        if (!done.await()) return null
+        return withContext(Dispatchers.Default) {
+            val img = SmartTools.fromGl(buf, w, h, 1, screenScale = 2)
+            Analysis(cam, lighting, img, SmartTools.edges(img))
+        }.also { analysis = it }
+    }
+
+    private suspend fun lineSnapped(x: Float, y: Float): Pair<Float, Float>? {
+        val a = ensureAnalysis(LIGHT_FLAT) ?: return null
+        return SmartTools.nearestEdge(a.img, a.edges, x, y, 14 * context.resources.displayMetrics.density)
+    }
+
+    /** Raycasts a screen outline onto the model (points that miss land on the plane through its centre). */
+    private fun outlineFromScreen(scr: FloatArray): List<FloatArray> {
+        val out = ArrayList<FloatArray>()
+        for (i in 0 until scr.size / 2) {
+            val p = safe { NativeBridge.nativeRaycast(handle, scr[i * 2], scr[i * 2 + 1]) }
+                ?: safe { NativeBridge.nativeUnproject(handle, floatArrayOf(scr[i * 2], scr[i * 2 + 1])) }
+            if (p != null && p.size >= 3) out += floatArrayOf(p[0], p[1], p[2])
+        }
+        return out
+    }
+
+    private fun useOutline(pts: List<FloatArray>, hint: String) {
+        if (pts.size < 3) { cutHint = "Couldn't find a clear area there — try another spot or zoom in."; return }
+        pushOutlineHistory()
+        cutPoints.clear()
+        cutPoints.addAll(pts)
+        cutShape = CutGeometry.CURVE
+        selectedCutPoint = -1
+        cutHint = hint
+        schedulePreview()
+        view?.requestRender()
+    }
+
+    fun wandTap(x: Float, y: Float) {
+        if (smartBusy) return
+        smartBusy = true
+        val density = context.resources.displayMetrics.density
+        scope.launch {
+            val a = ensureAnalysis(LIGHT_FLAT)
+            val pts = if (a == null) null else withContext(Dispatchers.Default) {
+                val mask = SmartTools.wand(a.img, a.edges, x, y, wandTolerance) ?: return@withContext null
+                val scr = SmartTools.maskToOutline(mask, a.img.w, a.img.h, { ix, iy -> a.img.toScreen(ix) to a.img.toScreen(iy) }, 3f * density)
+                    ?: return@withContext null
+                outlineFromScreen(scr)
+            }
+            smartBusy = false
+            if (pts == null) { cutHint = "Tap inside a panel on the model."; return@launch }
+            useOutline(pts, "Outline follows the panel. Drag points to adjust, then close it.")
+            cutTool = TOOL_OUTLINE
+            askConnect = true
+        }
+    }
+
+    /** Moves every outline point onto the nearest painted line or edge. */
+    fun fitToEdges() {
+        if (cutPoints.size < 3 || smartBusy) return
+        smartBusy = true
+        val density = context.resources.displayMetrics.density
+        scope.launch {
+            val a = ensureAnalysis(LIGHT_FLAT)
+            val pr = projectCutPoints()
+            val moved = if (a == null) null else withContext(Dispatchers.Default) {
+                val out = ArrayList<FloatArray>()
+                var n = 0
+                for (i in cutPoints.indices) {
+                    val sx = pr.getOrElse(i * 2) { Float.NaN }
+                    val sy = pr.getOrElse(i * 2 + 1) { Float.NaN }
+                    val e = if (sx.isNaN()) null else SmartTools.nearestEdge(a.img, a.edges, sx, sy, 22 * density, 0.22f)
+                    val p = e?.let { safe { NativeBridge.nativeRaycast(handle, it.first, it.second) } }
+                    if (p != null) { out += floatArrayOf(p[0], p[1], p[2]); n++ } else out += cutPoints[i].copyOf()
+                }
+                n to out
+            }
+            smartBusy = false
+            if (moved == null || moved.first == 0) { cutHint = "No clear lines near the outline."; return@launch }
+            pushOutlineHistory()
+            cutPoints.clear()
+            cutPoints.addAll(moved.second)
+            cutHint = "Moved ${moved.first} point${if (moved.first == 1) "" else "s"} onto the nearest lines."
+            schedulePreview()
+        }
+    }
+
+    /** Copies the current (or last cut) outline to the other side of the model. */
+    fun copyToOtherSide() {
+        val src: FloatArray = if (cutPoints.size >= 3) {
+            FloatArray(cutPoints.size * 3).also { f -> cutPoints.forEachIndexed { i, p -> System.arraycopy(p, 0, f, i * 3, 3) } }
+        } else lastOutline ?: run { cutHint = "Draw or cut an outline first."; return }
+        scope.launch {
+            val ax = if (mirrorAuto) withContext(Dispatchers.Default) { safe { NativeBridge.nativeDetectMirrorAxis(handle) } } ?: mirrorAxis else mirrorAxis
+            mirrorAxis = ax
+            val m = safe { NativeBridge.nativeMirrorPoints(handle, src, ax) } ?: return@launch
+            val pts = (0 until m.size / 3).map { i -> floatArrayOf(m[i * 3], m[i * 3 + 1], m[i * 3 + 2]) }
+            // a mirrored outline turns the other way round; keep it in the same direction
+            useOutline(pts.reversed(), "Copied to the other side (${"XYZ"[ax]} mirror). Rotate to check it, then close it.")
+            if (eraseSpots.isNotEmpty()) {
+                val e = eraseArray()!!
+                val c = FloatArray(eraseSpots.size * 3) { k -> e[(k / 3) * 4 + k % 3] }
+                val mc = safe { NativeBridge.nativeMirrorPoints(handle, c, ax) }
+                if (mc != null) {
+                    val r = eraseSpots.map { it[3] }
+                    eraseSpots.clear()
+                    r.forEachIndexed { i, rad -> eraseSpots.add(floatArrayOf(mc[i * 3], mc[i * 3 + 1], mc[i * 3 + 2], rad)) }
+                }
+            }
+        }
+    }
+
+    // ---- AI tap-to-select (MobileSAM, on device)
+    fun aiTap(x: Float, y: Float) {
+        if (aiBusy) return
+        if (!Sam.isDownloaded(context)) { askAiDownload = true; return }
+        aiPoints.add(Triple(x, y, if (aiExclude) 0 else 1))
+        runAi()
+    }
+
+    fun undoAiPoint() {
+        if (aiPoints.isEmpty()) return
+        aiPoints.removeAt(aiPoints.size - 1)
+        if (aiPoints.any { it.third == 1 }) runAi()
+    }
+
+    fun downloadAi() {
+        askAiDownload = false
+        aiDownload = 0f
+        scope.launch {
+            val err = withContext(Dispatchers.IO) {
+                runCatching { Sam.download(context) { f -> scope.launch { aiDownload = f } } }.exceptionOrNull()
+            }
+            aiDownload = null
+            cutHint = if (err != null) "AI download failed: ${err.message ?: "no connection"}" else "AI ready — tap the part you want."
+        }
+    }
+
+    private fun runAi() {
+        val pts = aiPoints.toList()
+        if (pts.none { it.third == 1 }) { cutHint = "Tap on the part first (Add)."; return }
+        aiBusy = true
+        cutHint = "Finding the part…"
+        val density = context.resources.displayMetrics.density
+        scope.launch {
+            val a = ensureAnalysis(LIGHT_STUDIO)
+            val result = if (a == null) null else withContext(Dispatchers.Default) {
+                runCatching {
+                    val sam = Sam.get(context)
+                    val emb = samEmbedding?.takeIf { it.first == a.cam }?.second
+                        ?: sam.encode(a.img.px, a.img.w, a.img.h).also { samEmbedding = a.cam to it }
+                    val imgPts = pts.map { (sx, sy, l) -> Triple(sx / a.img.step, sy / a.img.step, l) }
+                    val mask = sam.decode(emb, imgPts)
+                    val first = pts.first { it.third == 1 }
+                    val seedX = (first.first / a.img.step * emb.scale).toInt()
+                    val seedY = (first.second / a.img.step * emb.scale).toInt()
+                    var region = SmartTools.component(mask, emb.w, emb.h, seedX, seedY)
+                    if (region.none { it }) region = mask
+                    val k = a.img.step / emb.scale
+                    val scr = SmartTools.maskToOutline(region, emb.w, emb.h, { mx, my -> mx * k to my * k }, 3f * density)
+                        ?: return@runCatching null
+                    outlineFromScreen(scr)
+                }
+            }
+            aiBusy = false
+            val pts3 = result?.getOrNull()
+            when {
+                result == null -> cutHint = "Couldn't read the view — try again."
+                result.isFailure -> cutHint = "AI error: ${result.exceptionOrNull()?.message ?: "unknown"}"
+                pts3 == null -> cutHint = "Nothing found there — tap right on the part."
+                else -> useOutline(pts3, "AI outline ready. Tap more to refine, or drag points. Close it when it fits.")
+            }
+        }
+    }
+
     // ---------------------------------------------------------------- cut tool
     fun onTap(x: Float, y: Float) {
         when {
             hingePart >= 0 -> addHingePoint(x, y)
+            cutActive && cutTool == TOOL_ERASE -> { erasePaint(x, y, true); eraseEnd() }
+            cutActive && cutTool == TOOL_WAND -> wandTap(x, y)
+            cutActive && cutTool == TOOL_AI -> aiTap(x, y)
             cutActive && cutShape == CutGeometry.FLAP -> addFlapPoint(x, y)
             cutActive -> addCutPoint(x, y)
             measureActive -> addMeasurePoint(x, y)
@@ -689,6 +1056,7 @@ class ViewerController(
 
     fun cancelCut() {
         clearPreview()
+        resetSmart()
         selectedCutPoint = -1
         depthLo = 0f
         depthHi = 1f
@@ -709,10 +1077,20 @@ class ViewerController(
 
     /** Remembers the outline before a change so it can be undone. */
     private fun pushOutlineHistory() {
-        outlineUndo.add(cutPoints.map { it.copyOf() })
+        outlineUndo.add(snapshotOutline())
         if (outlineUndo.size > 200) outlineUndo.removeAt(0)
         outlineRedo.clear()
         syncHistory()
+    }
+
+    /** Outline points (3 floats) and erase spots (4 floats) in one history entry. */
+    private fun snapshotOutline(): List<FloatArray> = cutPoints.map { it.copyOf() } + eraseSpots.map { it.copyOf() }
+
+    private fun restoreOutline(e: List<FloatArray>) {
+        cutPoints.clear()
+        cutPoints.addAll(e.filter { it.size == 3 })
+        eraseSpots.clear()
+        eraseSpots.addAll(e.filter { it.size == 4 })
     }
 
     private fun clearOutlineHistory() {
@@ -723,10 +1101,8 @@ class ViewerController(
 
     fun undoCutPoint() {
         if (outlineUndo.isEmpty()) return
-        outlineRedo.add(cutPoints.map { it.copyOf() })
-        val prev = outlineUndo.removeAt(outlineUndo.size - 1)
-        cutPoints.clear()
-        cutPoints.addAll(prev)
+        outlineRedo.add(snapshotOutline())
+        restoreOutline(outlineUndo.removeAt(outlineUndo.size - 1))
         askConnect = false
         selectedCutPoint = -1
         syncHistory()
@@ -735,10 +1111,8 @@ class ViewerController(
 
     fun redoCutPoint() {
         if (outlineRedo.isEmpty()) return
-        outlineUndo.add(cutPoints.map { it.copyOf() })
-        val next = outlineRedo.removeAt(outlineRedo.size - 1)
-        cutPoints.clear()
-        cutPoints.addAll(next)
+        outlineUndo.add(snapshotOutline())
+        restoreOutline(outlineRedo.removeAt(outlineRedo.size - 1))
         askConnect = false
         selectedCutPoint = -1
         syncHistory()
@@ -777,6 +1151,7 @@ class ViewerController(
         }
         val snapPx = if (snapOn) 16 * density else 0f
         scope.launch {
+            if (lineSnap) lineSnapped(tx, ty)?.let { (lx, ly) -> tx = lx; ty = ly }
             val hit = withContext(Dispatchers.Default) {
                 safe { NativeBridge.nativeSnap(handle, tx, ty, snapPx, snapOn, snapOn) }
             }
@@ -798,7 +1173,7 @@ class ViewerController(
     // ---- editing the outline: select, drag, insert, delete
     /** Index of the outline point under the finger, or -1. */
     fun cutHandleAt(x: Float, y: Float): Int {
-        if (!cutActive || cutPoints.isEmpty() || askConnect || createPartOpen || cutBusy) return -1
+        if (!cutActive || cutTool != TOOL_OUTLINE || linesOnly || cutPoints.isEmpty() || askConnect || createPartOpen || cutBusy) return -1
         val pr = projectCutPoints()
         val r = 24 * context.resources.displayMetrics.density
         var best = -1
@@ -812,6 +1187,7 @@ class ViewerController(
     }
 
     fun beginDragPoint(i: Int) {
+        if (lineSnap && analysis == null) scope.launch { ensureAnalysis(LIGHT_FLAT) }
         dragIndex = i
         dragMoved = false
         selectedCutPoint = i
@@ -824,10 +1200,14 @@ class ViewerController(
         dragMoved = true
         dragBusy = true
         val density = context.resources.displayMetrics.density
+        showLoupe(x, y)
         scope.launch {
+            var tx = x
+            var ty = y
+            if (lineSnap) analysis?.let { a -> SmartTools.nearestEdge(a.img, a.edges, x, y, 14 * density)?.let { tx = it.first; ty = it.second } }
             val hit = withContext(Dispatchers.Default) {
-                safe { NativeBridge.nativeSnap(handle, x, y, if (snapOn) 12 * density else 0f, snapOn, snapOn) }
-                    ?: safe { NativeBridge.nativeUnproject(handle, floatArrayOf(x, y)) }
+                safe { NativeBridge.nativeSnap(handle, tx, ty, if (snapOn) 12 * density else 0f, snapOn, snapOn) }
+                    ?: safe { NativeBridge.nativeUnproject(handle, floatArrayOf(tx, ty)) }
             }
             if (hit != null && i < cutPoints.size) cutPoints[i] = hit
             dragBusy = false
@@ -836,6 +1216,7 @@ class ViewerController(
     }
 
     fun endDragPoint() {
+        hideLoupe()
         if (!dragMoved) {
             // a tap on a point: undo the history entry made for the drag, keep it selected
             if (outlineUndo.isNotEmpty()) { outlineUndo.removeAt(outlineUndo.size - 1); syncHistory() }
@@ -893,21 +1274,23 @@ class ViewerController(
         cutPoints.forEachIndexed { i, p -> System.arraycopy(p, 0, flat, i * 3, 3) }
         val lo = depthLo
         val hi = depthHi
+        val er = eraseArray()
+        if (linesOnly) { clearPreview(); return }
         previewJob = scope.launch {
             delay(120)
-            withContext(Dispatchers.Default) { safe { NativeBridge.nativePreviewCut(handle, flat, lo, hi) } }
+            withContext(Dispatchers.Default) { safe { NativeBridge.nativePreviewCut(handle, flat, lo, hi, er) } }
             view?.requestRender()
         }
     }
 
     private fun clearPreview() {
         previewJob?.cancel()
-        safe { NativeBridge.nativePreviewCut(handle, null, 0f, 1f) }
+        safe { NativeBridge.nativePreviewCut(handle, null, 0f, 1f, null) }
         view?.requestRender()
     }
 
     /** True while one-finger drags draw a shape instead of rotating the view. */
-    fun isDrawMode() = cutActive && cutShape in CutGeometry.FREEHAND..CutGeometry.ELLIPSE && !askConnect && !createPartOpen && !cutBusy
+    fun isDrawMode() = cutActive && cutTool == TOOL_OUTLINE && cutShape in CutGeometry.FREEHAND..CutGeometry.ELLIPSE && !askConnect && !createPartOpen && !cutBusy
 
     fun drawStart(x: Float, y: Float) {
         drawAnchorX = x; drawAnchorY = y
@@ -1154,16 +1537,18 @@ class ViewerController(
         val gapUnits = gapMm / 1000.0 / unitMeters()
         val dLo = depthLo
         val dHi = depthHi
+        val er = eraseArray()
+        lastOutline = flat.copyOf()
         clearPreview()
         val outlines: Pair<FloatArray, FloatArray>? = if (gapUnits > 0) gapOutlines(flat, gapUnits) else null
         scope.launch {
             val r = withContext(Dispatchers.Default) {
                 fun one(pName: String, mirrorAx: Int, keepUndo: Boolean): String {
-                    if (outlines == null) return safe { NativeBridge.nativeCut(handle, flat, mode, pName, mirrorAx, keepUndo, -1, dLo, dHi) } ?: "ERR|Cancelled"
-                    val outer = safe { NativeBridge.nativeCut(handle, outlines.first, mode, "$pName (gap)", mirrorAx, keepUndo, -1, dLo, dHi) } ?: "ERR|Cancelled"
+                    if (outlines == null) return safe { NativeBridge.nativeCut(handle, flat, mode, pName, mirrorAx, keepUndo, -1, dLo, dHi, er) } ?: "ERR|Cancelled"
+                    val outer = safe { NativeBridge.nativeCut(handle, outlines.first, mode, "$pName (gap)", mirrorAx, keepUndo, -1, dLo, dHi, er) } ?: "ERR|Cancelled"
                     if (outer.startsWith("ERR|")) return outer
                     val tmp = outer.substringBefore('|').toIntOrNull() ?: return outer
-                    val inner = safe { NativeBridge.nativeCut(handle, outlines.second, mode, pName, mirrorAx, false, tmp, dLo, dHi) } ?: "ERR|Cancelled"
+                    val inner = safe { NativeBridge.nativeCut(handle, outlines.second, mode, pName, mirrorAx, false, tmp, dLo, dHi, er) } ?: "ERR|Cancelled"
                     safe { NativeBridge.nativeDeletePart(handle, tmp) }
                     return inner
                 }
@@ -1185,6 +1570,7 @@ class ViewerController(
             val tris = parts.getOrNull(1)?.toLongOrNull() ?: 0
             val caps = parts.getOrNull(2)?.toLongOrNull() ?: 0
             cutCount++
+            resetSmart()
             cutActive = false
             cutPoints.clear()
             clearOutlineHistory()
@@ -1438,5 +1824,14 @@ class ViewerController(
                 }
             }
         }
+    }
+
+    companion object {
+        const val TOOL_OUTLINE = 0
+        const val TOOL_ERASE = 1
+        const val TOOL_WAND = 2
+        const val TOOL_AI = 3
+        const val LIGHT_STUDIO = 0
+        const val LIGHT_FLAT = 5
     }
 }

@@ -79,11 +79,29 @@ fun CutOverlay(c: ViewerController, p: Palette) {
     val t = rememberInfiniteTransition(label = "cut")
     val pulse by t.animateFloat(0.6f, 1.25f, infiniteRepeatable(tween(900, easing = LinearEasing), RepeatMode.Reverse), label = "pulse")
     val dash by t.animateFloat(0f, 40f, infiniteRepeatable(tween(1200, easing = LinearEasing)), label = "dash")
+    var spots by remember { mutableStateOf(FloatArray(0)) }
+    LaunchedEffect(c.cutActive, c.eraseSpots.size) {
+        while (c.cutActive) {
+            withFrameNanos { }
+            spots = c.projectEraseSpots()
+        }
+        spots = FloatArray(0)
+    }
     val live = c.drawPath
     val flap = c.flapPreview
     val outline = c.outlineForOverlay(pts)
     Canvas(Modifier.fillMaxSize()) {
         val glow0 = Color(0xFFFF9E26)
+        // erase brush: protected areas in red
+        for (i in 0 until spots.size / 3) {
+            if (spots[i * 3].isNaN()) continue
+            drawCircle(Color(0x55FF4D6D), spots[i * 3 + 2], Offset(spots[i * 3], spots[i * 3 + 1]))
+        }
+        c.aiPoints.forEach { (x, y, l) ->
+            drawCircle(Color.Black.copy(alpha = 0.4f), 10.dp.toPx(), Offset(x, y))
+            drawCircle(if (l == 1) Color(0xFF3DDC97) else Color(0xFFFF4D6D), 7.dp.toPx(), Offset(x, y))
+            drawCircle(Color.White, 2.5.dp.toPx(), Offset(x, y))
+        }
         if (live.size >= 4) {
             for (i in 0 until live.size / 2 - 1) {
                 drawLine(Color.Black.copy(alpha = 0.35f), Offset(live[i * 2], live[i * 2 + 1]), Offset(live[i * 2 + 2], live[i * 2 + 3]),
@@ -115,6 +133,7 @@ fun CutOverlay(c: ViewerController, p: Palette) {
                 drawLine(p.accent.copy(alpha = if (i == m - 1) 0.5f else 0.95f), a, b, strokeWidth = 3.dp.toPx(), cap = StrokeCap.Round)
             }
         }
+        if (c.linesOnly && outline !== pts) return@Canvas
         val n = pts.size / 2
         if (n == 0) return@Canvas
         fun pt(i: Int) = Offset(pts[i * 2], pts[i * 2 + 1])
@@ -138,7 +157,7 @@ fun CutOverlay(c: ViewerController, p: Palette) {
                 pathEffect = PathEffect.dashPathEffect(floatArrayOf(14f, 12f), dash),
             )
         }
-        val dense = c.cutShape >= com.dronedirector.vertexapro.viewer.CutGeometry.FREEHAND
+        val dense = c.cutShape >= com.dronedirector.vertexapro.viewer.CutGeometry.FREEHAND || c.linesOnly
         if (dense) {
             for (i in 0 until n) {
                 val j = (i + 1) % n
@@ -146,7 +165,7 @@ fun CutOverlay(c: ViewerController, p: Palette) {
                 drawLine(Color.Black.copy(alpha = 0.35f), pt(i), pt(j), strokeWidth = 7.dp.toPx(), cap = StrokeCap.Round)
                 drawLine(brush, pt(i), pt(j), strokeWidth = 3.dp.toPx(), cap = StrokeCap.Round)
             }
-            if (ok(0)) drawCircle(glow, 6.dp.toPx(), pt(0))
+            if (ok(0) && !c.linesOnly) drawCircle(glow, 6.dp.toPx(), pt(0))
             return@Canvas
         }
         for (i in 0 until n) {
@@ -163,92 +182,6 @@ fun CutOverlay(c: ViewerController, p: Palette) {
             if (i == c.selectedCutPoint) {
                 drawCircle(Color.White, 14.dp.toPx(), pt(i), style = androidx.compose.ui.graphics.drawscope.Stroke(2.5.dp.toPx()))
             }
-        }
-    }
-}
-
-@Composable
-fun CutToolbar(c: ViewerController, p: Palette) {
-    Column(
-        Modifier.padding(horizontal = 16.dp).widthIn(max = 600.dp).glass(p, RoundedCornerShape(22.dp), strong = true).padding(14.dp),
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(34.dp).clip(CircleShape).background(p.accentBrush), contentAlignment = Alignment.Center) {
-                Icon(Icons.Outlined.ContentCut, null, tint = Color.White, modifier = Modifier.size(18.dp))
-            }
-            Spacer(Modifier.width(10.dp))
-            Column(Modifier.weight(1f)) {
-                Text("Cut tool", color = p.text, fontWeight = FontWeight.Black, fontSize = 16.sp)
-                Text(c.cutHint ?: "", color = p.muted, fontSize = 12.sp, lineHeight = 15.sp)
-            }
-        }
-        VSpace(10.dp)
-        Row(
-            Modifier.horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically,
-        ) {
-            listOf("Points", "Curve", "Freehand", "Rectangle", "Ellipse", "Flap").forEachIndexed { i, label ->
-                PillChip(label, c.cutShape == i, p) {
-                    if (c.cutShape != i) { c.cutShape = i; c.cutHint = shapeHint(i) }
-                }
-            }
-        }
-        VSpace(8.dp)
-        Row(
-            Modifier.horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically,
-        ) {
-            PillChip("Top", false, p) { c.viewPreset(0) }
-            PillChip("Front", false, p) { c.viewPreset(2) }
-            PillChip("Side", false, p) { c.viewPreset(5) }
-            PillChip("Flat view", c.ortho, p) { c.toggleOrtho() }
-            if (c.cutShape <= 1) {
-                PillChip("Snap", c.snapOn, p) { c.snapOn = !c.snapOn }
-                PillChip("Straight 45°", c.straightOn, p) { c.straightOn = !c.straightOn }
-            }
-        }
-        if (c.cutPoints.size >= 3 && c.cutShape != com.dronedirector.vertexapro.viewer.CutGeometry.FLAP) {
-            VSpace(6.dp)
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.width(110.dp)) {
-                    Text("Depth", color = p.text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                    Text(
-                        if (c.depthLo <= 0.001f && c.depthHi >= 0.999f) "Whole model" else "${(c.depthLo * 100).toInt()}–${(c.depthHi * 100).toInt()}% deep",
-                        color = p.muted, fontSize = 11.sp,
-                    )
-                }
-                androidx.compose.material3.RangeSlider(
-                    value = c.depthLo..c.depthHi,
-                    onValueChange = { r -> c.updateDepth(r.start, r.endInclusive) },
-                    modifier = Modifier.weight(1f),
-                    colors = androidx.compose.material3.SliderDefaults.colors(thumbColor = p.accent, activeTrackColor = p.accent2, inactiveTrackColor = p.border),
-                )
-            }
-            Text("Orange shows what will be cut. Front = nearest to you.", color = p.muted, fontSize = 11.sp)
-        }
-        if (c.cutShape == com.dronedirector.vertexapro.viewer.CutGeometry.FLAP && c.cutPoints.size >= 2) {
-            VSpace(8.dp)
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Chord depth ${(c.flapDepth * 100).toInt()}%", color = p.text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.width(130.dp))
-                androidx.compose.material3.Slider(
-                    value = c.flapDepth, onValueChange = { c.setFlapDepthValue(it) }, valueRange = 0.08f..0.5f,
-                    modifier = Modifier.weight(1f),
-                    colors = androidx.compose.material3.SliderDefaults.colors(thumbColor = p.accent, activeTrackColor = p.accent2, inactiveTrackColor = p.border),
-                )
-            }
-            if (c.flapPreview.size >= 8) {
-                GradientButton("Use outline", Icons.Outlined.ContentCut, p, Modifier.fillMaxWidth()) { c.useFlapOutline() }
-            }
-        }
-        VSpace(8.dp)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            ToolIcon(Icons.AutoMirrored.Outlined.Undo, "Undo", c.canUndoPoint, p) { c.undoCutPoint() }
-            ToolIcon(Icons.AutoMirrored.Outlined.Redo, "Redo", c.canRedoPoint, p) { c.redoCutPoint() }
-            if (c.selectedCutPoint >= 0) PillChip("Delete point", false, p) { c.deleteSelectedPoint() }
-            if (c.cutShape <= 1 && c.cutPoints.size >= 3) PillChip("Close outline", false, p) { c.askConnect = true }
-            Spacer(Modifier.weight(1f))
-            PillChip("Cancel", false, p) { c.cancelCut() }
         }
     }
 }
@@ -421,7 +354,7 @@ fun LastCutBar(c: ViewerController, p: Palette) {
 }
 
 @Composable
-private fun ToolIcon(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, enabled: Boolean, p: Palette, onClick: () -> Unit) {
+internal fun ToolIcon(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, enabled: Boolean, p: Palette, onClick: () -> Unit) {
     val fg = if (enabled) p.text else p.muted.copy(alpha = 0.5f)
     Row(
         Modifier.clip(RoundedCornerShape(50))

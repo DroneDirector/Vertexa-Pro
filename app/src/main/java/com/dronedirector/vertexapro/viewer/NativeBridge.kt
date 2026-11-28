@@ -39,8 +39,10 @@ object NativeBridge {
     @JvmStatic external fun nativeProject(h: Long, pts: FloatArray): FloatArray
     @JvmStatic external fun nativeCut(
         h: Long, pts: FloatArray, mode: Int, name: String, mirrorAxis: Int, keepUndo: Boolean, onlyPart: Int, depthLo: Float, depthHi: Float,
+        erase: FloatArray?,
     ): String
-    @JvmStatic external fun nativePreviewCut(h: Long, pts: FloatArray?, depthLo: Float, depthHi: Float)
+    @JvmStatic external fun nativePreviewCut(h: Long, pts: FloatArray?, depthLo: Float, depthHi: Float, erase: FloatArray?)
+    @JvmStatic external fun nativeMirrorPoints(h: Long, pts: FloatArray, axis: Int): FloatArray
     @JvmStatic external fun nativeSetOrtho(h: Long, on: Boolean)
     @JvmStatic external fun nativeViewPreset(h: Long, preset: Int)
     @JvmStatic external fun nativeSetPartHinge(h: Long, part: Int, a: FloatArray, b: FloatArray, deg: Float)
@@ -63,6 +65,7 @@ object NativeBridge {
     @JvmStatic external fun nativeClearModel(h: Long)
     @JvmStatic external fun nativeReleaseGl(h: Long)
     @JvmStatic external fun nativeSnapshot(h: Long, w: Int, hgt: Int, transparent: Boolean, out: java.nio.ByteBuffer): Boolean
+    @JvmStatic external fun nativeAnalysisImage(h: Long, w: Int, hgt: Int, lighting: Int, out: java.nio.ByteBuffer): Boolean
     @JvmStatic external fun nativeBeginTurntable(h: Long)
     @JvmStatic external fun nativeTurntableFrame(h: Long, angle: Double, w: Int, hgt: Int)
     @JvmStatic external fun nativeEndTurntable(h: Long)

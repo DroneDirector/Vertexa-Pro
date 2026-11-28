@@ -2,6 +2,18 @@
 
 ## Next
 
+- Cut tools now live in a menu at the top centre that only appears while cutting, grouped in tabs: Draw · Smart · Refine · View
+- AI select: tap a flap, door or panel and on-device AI (MobileSAM) outlines it; add or remove areas with more taps. One-time 45 MB download, then fully offline
+- Magic wand: tap inside a painted panel and the outline follows its panel lines (adjustable tolerance)
+- Snap to lines: taps and dragged points jump onto painted panel lines and edges
+- Fit to edges: moves every outline point onto the nearest line in one go
+- Copy to other side: mirrors the current or last outline to the other wing or side of the model
+- Erase brush: paint over areas the cut must leave alone (adjustable brush size, shown in red, undo/redo)
+- Magnifier: a small ~3 cm window at the top shows exactly where the point under your finger is while dragging or erasing (adjustable zoom)
+- "Cut lines only" view hides handles and the orange preview to check the line itself
+
+## 1.0.14
+
 - Edit the cut outline: tap a point to select it (and delete it), drag points to fine-tune them, tap on a line to add a point there
 - Rectangles become 4 draggable corners; ovals and freehand shapes become smooth curves through a few draggable points
 - Depth range for cuts: a two-handle slider limits how deep the cut reaches front-to-back, so things underneath aren't hit

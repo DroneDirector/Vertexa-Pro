@@ -468,6 +468,7 @@ Renderer::CutResult Renderer::cut(const CutRequest& req, Sink* sink) {
         *fw = -*fw;
         mreq = req;
         for (size_t i = 0; i < n; i++) mreq.points[i * 3 + ax] = (float)(2 * c - mreq.points[i * 3 + ax]);
+        for (size_t k = 0; k + 4 <= mreq.erase.size(); k += 4) mreq.erase[k + ax] = (float)(2 * c - mreq.erase[k + ax]);
         rq = &mreq;
     }
     const CutRequest& R = *rq;
@@ -533,7 +534,15 @@ Renderer::CutResult Renderer::cut(const CutRequest& req, Sink* sink) {
         dLo = mn + (mx - mn) * req.depthLo;
         dHi = mn + (mx - mn) * req.depthHi;
     }
+    auto erased = [&](const float* p) {
+        for (size_t k = 0; k + 4 <= R.erase.size(); k += 4) {
+            double dx = p[0] - R.erase[k], dy = p[1] - R.erase[k + 1], dz = p[2] - R.erase[k + 2];
+            if (dx * dx + dy * dy + dz * dz <= (double)R.erase[k + 3] * R.erase[k + 3]) return true;
+        }
+        return false;
+    };
     auto inDepth = [&](const float* p) {
+        if (erased(p)) return false;
         if (!limitDepth) return true;
         double d = (V3(p[0], p[1], p[2]) - cc.eye).dot(cc.fwd);
         return d >= dLo && d <= dHi;
@@ -982,6 +991,12 @@ void Renderer::previewCut(const CutRequest& req) {
                         double dd = (V3(cen[0], cen[1], cen[2]) - cc.eye).dot(cc.fwd);
                         if (dd < dLo || dd > dHi) continue;
                     }
+                    bool gone = false;
+                    for (size_t k = 0; k + 4 <= req.erase.size() && !gone; k += 4) {
+                        double dx = cen[0] - req.erase[k], dy = cen[1] - req.erase[k + 1], dz = cen[2] - req.erase[k + 2];
+                        if (dx * dx + dy * dy + dz * dz <= (double)req.erase[k + 3] * req.erase[k + 3]) gone = true;
+                    }
+                    if (gone) continue;
                     out[ci].insert(out[ci].end(), {c.tris[t], c.tris[t + 1], c.tris[t + 2]});
                 }
             }
@@ -1002,6 +1017,12 @@ void Renderer::deletePart(int part, Sink* sink) {
     cpu_.swap(keep);
     rebuildGpu_ = true;
     recomputeParts(sink);
+}
+
+double Renderer::mirrorCenter(int ax) {
+    std::lock_guard<std::mutex> l(mu_);
+    if (!bounds_.valid() || ax < 0 || ax > 2) return 0;
+    return (bounds_.mn[ax] + bounds_.mx[ax]) / 2;
 }
 
 int Renderer::detectMirrorAxis() {

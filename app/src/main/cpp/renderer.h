@@ -44,7 +44,7 @@ public:
     void releaseGl();  // deletes every GL object; call with the context current
     void setTexture(int material, int glTex);
     /** Renders the current view off-screen at w x h into out (RGBA, bottom row first). */
-    bool snapshot(int w, int h, bool transparent, uint8_t* out);
+    bool snapshot(int w, int h, bool transparent, uint8_t* out, int analysisLighting = -1);
     /** Turntable video: renders one frame into the currently bound surface, rotated by angle radians. */
     void beginTurntable();
     void turntableFrame(double angle, int w, int h);
@@ -58,6 +58,7 @@ public:
         int mirrorAxis = -1;        // 0/1/2: cut the mirror image across the model's centre on that axis
         int onlyPart = -1;          // >= 0: cut only this part
         float depthLo = 0.f, depthHi = 1.f;  // part of the model's depth (front 0 → back 1) the cut may reach
+        std::vector<float> erase;            // spheres (x, y, z, radius) painted out of the cut
         bool keepUndo = true;       // false for the second half of a mirrored cut (undo covers both)
     };
     struct CutResult {
@@ -87,6 +88,8 @@ public:
     void deletePart(int part, Sink* sink);
     /** 0 / 1 / 2: the axis the model is most symmetric across (through its centre). */
     int detectMirrorAxis();
+    /** Centre of the model along an axis (the mirror plane used by mirror cuts). */
+    double mirrorCenter(int axis);
     /** Pixels per model unit at the model's centre in the current view. */
     double pixelsPerUnit();
     /** Writes a binary glTF with one node per part, pivots from [pivots] (x,y,z per part, NaN = part centre). */
@@ -186,6 +189,7 @@ private:
         bool upZ = false;
         int selected = -1;
         bool ortho = false;
+        bool noOverlay = false;  // analysis renders: no cut preview highlight
         std::map<int, M4> partXf;
         std::vector<uint8_t> hidden;
         std::vector<Material> mats;
