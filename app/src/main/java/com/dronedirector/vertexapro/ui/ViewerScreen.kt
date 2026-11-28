@@ -51,6 +51,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.Redo
+import androidx.compose.material.icons.automirrored.outlined.Undo
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.AutoAwesomeMosaic
 import androidx.compose.material.icons.outlined.CenterFocusStrong
@@ -273,6 +275,15 @@ fun ViewerScreen(
                     .horizontalScroll(rememberScrollState()).padding(6.dp),
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
             ) {
+                // undo / redo: always here; while drawing they step through the outline, otherwise through cuts and edits
+                val drawing = c.cutActive && (c.canUndoPoint || c.canRedoPoint)
+                HistoryButton(Icons.AutoMirrored.Outlined.Undo, "Undo", if (drawing) c.canUndoPoint else c.hasUndo, p) {
+                    if (drawing) c.undoCutPoint() else c.undoLastCut()
+                }
+                HistoryButton(Icons.AutoMirrored.Outlined.Redo, "Redo", if (drawing) c.canRedoPoint else c.hasRedo, p) {
+                    if (drawing) c.redoCutPoint() else c.redoLastCut()
+                }
+                Box(Modifier.padding(vertical = 8.dp).width(1.dp).height(40.dp).background(p.border))
                 modeItems.forEach { m ->
                     ModeButton(m, c.mode == m.mode, p) { c.updateMode(m.mode); onModeChanged(m.mode) }
                 }
@@ -433,6 +444,20 @@ fun ViewerScreen(
 }
 
 private fun pct(f: Float) = "${(f.coerceIn(0f, 1f) * 100).toInt()}%"
+
+@Composable
+private fun HistoryButton(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, enabled: Boolean, p: Palette, onClick: () -> Unit) {
+    Box(
+        Modifier.clip(RoundedCornerShape(20.dp)).then(if (enabled) Modifier.pressable(onClick) else Modifier)
+            .padding(horizontal = 10.dp, vertical = 9.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Icon(icon, label, tint = if (enabled) p.text else p.muted.copy(alpha = 0.4f), modifier = Modifier.size(22.dp))
+            Text(label, color = if (enabled) p.muted else p.muted.copy(alpha = 0.4f), fontSize = 11.sp, fontWeight = FontWeight.Medium)
+        }
+    }
+}
 
 @Composable
 private fun ModeButton(m: ModeItem, selected: Boolean, p: Palette, onClick: () -> Unit) {

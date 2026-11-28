@@ -1784,7 +1784,7 @@ class ViewerController(
             if (ok) {
                 hasUndo = false
                 hasRedo = true
-                lastCut = "Cut undone"
+                lastCut = "Undone"
                 selectPart(-1)
                 delay(100)
                 refreshStats()

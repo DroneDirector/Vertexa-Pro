@@ -2,6 +2,10 @@
 
 ## Next
 
+- Undo and Redo are always in the bottom menu: while drawing an outline they step through the points, otherwise through cuts and edits
+
+## 1.0.19
+
 - Edit a part after it's created: "Edit with brush" on the selected part shows it in orange; erase what shouldn't belong to it (it goes back where it came from) or paint more onto it, then Apply — the part updates, and Undo works
 
 ## 1.0.18
