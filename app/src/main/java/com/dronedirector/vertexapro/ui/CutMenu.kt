@@ -26,6 +26,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Redo
 import androidx.compose.material.icons.automirrored.outlined.Undo
 import androidx.compose.material.icons.outlined.AutoAwesome
+import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ContentCut
 import androidx.compose.material.icons.outlined.Download
@@ -85,7 +86,10 @@ fun CutToolbar(c: ViewerController, p: Palette) {
             Spacer(Modifier.width(4.dp))
             ToolIcon(Icons.AutoMirrored.Outlined.Redo, "Redo", c.canRedoPoint, p) { c.redoCutPoint() }
             Spacer(Modifier.width(4.dp))
-            if (c.brushSelCount > 0) {
+            if (c.editPart >= 0) {
+                ToolIcon(Icons.Outlined.Check, "Apply changes to the part", !c.cutBusy, p) { c.applyPartEdit() }
+                Spacer(Modifier.width(4.dp))
+            } else if (c.brushSelCount > 0) {
                 ToolIcon(Icons.Outlined.ContentCut, "Create part from selection", true, p) { c.createPartOpen = true }
                 Spacer(Modifier.width(4.dp))
             }
@@ -173,8 +177,11 @@ private fun BrushTab(c: ViewerController, p: Palette) {
             PillChip("Select", c.brushAdd, p) { c.brushAdd = true }
             PillChip("Erase", !c.brushAdd, p) { c.brushAdd = false }
             PillChip("X-ray", c.brushXray, p) { c.brushXray = !c.brushXray }
-            if (c.brushSelCount > 0) PillChip("Clear", false, p) { c.clearBrushSelection() }
-            if (c.brushSelCount > 0) PillChip("Create part", false, p) { c.createPartOpen = true }
+            if (c.editPart >= 0) PillChip("Apply", true, p) { c.applyPartEdit() }
+            else {
+                if (c.brushSelCount > 0) PillChip("Clear", false, p) { c.clearBrushSelection() }
+                if (c.brushSelCount > 0) PillChip("Create part", false, p) { c.createPartOpen = true }
+            }
         }
     }
     if (t == ViewerController.TOOL_ERASE && c.eraseSpots.isNotEmpty()) {

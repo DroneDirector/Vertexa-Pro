@@ -2,6 +2,10 @@
 
 ## Next
 
+- Edit a part after it's created: "Edit with brush" on the selected part shows it in orange; erase what shouldn't belong to it (it goes back where it came from) or paint more onto it, then Apply — the part updates, and Undo works
+
+## 1.0.18
+
 - Points snap only to the surface you're looking at: from above they land on the top skin, from below on the bottom — never on corners of the far side
 - The orange preview now shows the exact cut: split right along the drawn line, with the cut mode you pick — no more jagged triangle edges
 

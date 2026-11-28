@@ -996,6 +996,7 @@ Renderer::CutResult Renderer::cut(const CutRequest& req, Sink* sink) {
     }
     if (req.keepUndo) undo_ = cpu_;
     redo_.clear();
+    parentPart_[newPart] = keepPartForCaps;
     cpu_.swap(result);
     rebuildGpu_ = true;
     recomputeParts(sink);
@@ -1356,6 +1357,7 @@ int Renderer::separateSelection(const std::string& name, Sink* sink, int64_t& mo
     int64_t any = countSel(preview_);
     if (any == 0) return -1;
     int newPart = sink->addPart(name.empty() ? "Selected part" : name);
+    std::unordered_map<int, int64_t> fromCount;
     std::vector<std::shared_ptr<Chunk>> result;
     for (size_t ci = 0; ci < cpu_.size(); ci++) {
         const Chunk& c = *cpu_[ci];
@@ -1367,8 +1369,15 @@ int Renderer::separateSelection(const std::string& name, Sink* sink, int64_t& mo
         }
         if (cut.empty()) { result.push_back(cpu_[ci]); continue; }
         moved += (int64_t)cut.size() / 3;
+        fromCount[c.part] += (int64_t)cut.size();
         if (auto k = buildChunk(c.verts, keep, c.material, c.part)) result.push_back(std::shared_ptr<Chunk>(k.release()));
         if (auto n = buildChunk(c.verts, cut, c.material, newPart)) result.push_back(std::shared_ptr<Chunk>(n.release()));
+    }
+    {
+        int from = 0;
+        int64_t most = -1;
+        for (auto& kv : fromCount) if (kv.second > most) { most = kv.second; from = kv.first; }
+        parentPart_[newPart] = from;
     }
     undo_ = cpu_;
     redo_.clear();
@@ -1520,6 +1529,66 @@ bool Renderer::mergeParts(int a, int b, bool connect, Sink* sink, int64_t& seals
     recomputeParts(sink);
     sink->log(0, std::string(connect ? "Connected" : "Combined") + " two parts" +
                      (connect ? ": " + std::to_string(seals) + " seal triangles removed, " + std::to_string(welded) + " seam vertices welded." : "."));
+    return true;
+}
+
+int64_t Renderer::editPartSelection(int part) {
+    std::lock_guard<std::mutex> dl(dataMu_);
+    if (!keepCpu_ || cpu_.empty()) return 0;
+    tsel_.clear();
+    vsel_.clear();
+    ensureSel_();
+    for (size_t ci = 0; ci < cpu_.size(); ci++)
+        if (cpu_[ci]->part == part && !cpu_[ci]->points) std::fill(tsel_[ci].begin(), tsel_[ci].end(), 1);
+    selToPreview_();
+    return countSel(preview_);
+}
+
+bool Renderer::applyPartEdit(int part, Sink* sink, int64_t& out, int64_t& in) {
+    out = 0;
+    in = 0;
+    if (!sink || part < 0) return false;
+    std::lock_guard<std::mutex> dl(dataMu_);
+    if (!keepCpu_ || cpu_.empty() || tsel_.size() != cpu_.size()) return false;
+    int parent = -1;
+    auto pit = parentPart_.find(part);
+    if (pit != parentPart_.end()) parent = pit->second;
+    if (parent < 0 || parent == part) {
+        // not made by a cut here: erased triangles go to the biggest other part
+        std::unordered_map<int, int64_t> cnt;
+        for (auto& c : cpu_) if (c->part != part) cnt[c->part] += (int64_t)c->tris.size();
+        int64_t most = -1;
+        parent = 0;
+        for (auto& kv : cnt) if (kv.second > most) { most = kv.second; parent = kv.first; }
+    }
+    std::vector<std::shared_ptr<Chunk>> result;
+    for (size_t ci = 0; ci < cpu_.size(); ci++) {
+        const Chunk& c = *cpu_[ci];
+        if (c.points || c.tris.empty()) { result.push_back(cpu_[ci]); continue; }
+        std::vector<uint32_t> stay, move;
+        for (size_t t = 0; t * 3 + 2 < c.tris.size(); t++) {
+            const uint32_t* tr = &c.tris[t * 3];
+            bool s = tsel_[ci][t] || (vsel_[ci][tr[0]] && vsel_[ci][tr[1]] && vsel_[ci][tr[2]]);
+            bool mv = c.part == part ? !s : s;  // erased from the part / painted onto it
+            std::vector<uint32_t>& dst = mv ? move : stay;
+            dst.insert(dst.end(), {tr[0], tr[1], tr[2]});
+        }
+        if (move.empty()) { result.push_back(cpu_[ci]); continue; }
+        int target = c.part == part ? parent : part;
+        (c.part == part ? out : in) += (int64_t)move.size() / 3;
+        if (auto k = buildChunk(c.verts, stay, c.material, c.part)) result.push_back(std::shared_ptr<Chunk>(k.release()));
+        if (auto m = buildChunk(c.verts, move, c.material, target)) result.push_back(std::shared_ptr<Chunk>(m.release()));
+    }
+    undo_ = cpu_;
+    redo_.clear();
+    cpu_.swap(result);
+    tsel_.clear();
+    vsel_.clear();
+    preview_.clear();
+    previewDirty_ = true;
+    rebuildGpu_ = true;
+    recomputeParts(sink);
+    sink->log(0, "Brush edit: " + std::to_string(out) + " triangles taken off the part, " + std::to_string(in) + " added.");
     return true;
 }
 

@@ -658,6 +658,43 @@ class ViewerController(
         }
     }
 
+    /** Part being touched up with the brush after it was created (-1 none). */
+    var editPart by mutableIntStateOf(-1)
+        private set
+
+    /** Opens the brush on a finished part: it shows in orange, erase what shouldn't belong to it, paint to add. */
+    fun editPartWithBrush(part: Int) {
+        if (!canEdit) return
+        if (part in hiddenParts) setPartVisible(part, true)
+        startCut()
+        selectBrush(1)
+        brushAdd = false
+        scope.launch {
+            val n = withContext(Dispatchers.Default) { safe { NativeBridge.nativeEditPartSelection(handle, part) } } ?: 0L
+            editPart = part
+            brushSelCount = n
+            cutHint = "Editing \u201c${partName(part)}\u201d (orange). Erase what shouldn't belong to it, Select to add more, then tap \u2713 Apply."
+            view?.requestRender()
+        }
+    }
+
+    fun applyPartEdit() {
+        val part = editPart
+        if (part < 0) return
+        cutBusy = true
+        scope.launch {
+            val r = withContext(Dispatchers.Default) { safe { NativeBridge.nativeApplyPartEdit(handle, part) } }
+            cutBusy = false
+            if (r == null || r[0] == 0L) { cutHint = "Couldn't update the part."; return@launch }
+            brushSelCount = 0
+            val name = partName(part)
+            editPart = -1
+            finishNewPart(part, "Updated \u201c$name\u201d · ${com.dronedirector.vertexapro.data.formatCount(r[1])} triangles taken off, " +
+                "${com.dronedirector.vertexapro.data.formatCount(r[2])} added")
+            cutCount--
+        }
+    }
+
     fun selectBrush(kind: Int) {
         brushKind = kind
         if (cutTool != TOOL_BRUSH) chooseCutTool(TOOL_BRUSH)
@@ -679,6 +716,7 @@ class ViewerController(
 
     private fun resetSmart() {
         cutTool = TOOL_OUTLINE
+        editPart = -1
         if (brushSelCount > 0) safe { NativeBridge.nativeClearSelection(handle) }
         brushSelCount = 0
         eraseSpots.clear()
@@ -1599,6 +1637,7 @@ class ViewerController(
     fun nextCutName(): String = "Cut part ${cutCount + 1}"
 
     fun createPart(name: String, mode: Int) {
+        if (editPart >= 0) { applyPartEdit(); return }
         if (brushSelCount > 0) { separateSelection(name); return }
         if (cutPoints.size < 3) return
         cutBusy = true

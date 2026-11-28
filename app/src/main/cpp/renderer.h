@@ -8,6 +8,7 @@
 #include <memory>
 #include <mutex>
 #include <vector>
+#include <unordered_map>
 
 #include "anim.h"
 #include "mesh.h"
@@ -102,6 +103,11 @@ public:
     bool mergeParts(int a, int b, bool connect, Sink* sink, int64_t& sealsRemoved, int64_t& welded);
     /** Number of vertex positions the two parts share (> 0: they touch). */
     int64_t partsTouch(int a, int b);
+    /** Starts brushing a finished part: all its triangles become the selection. Returns the count. */
+    int64_t editPartSelection(int part);
+    /** Applies the brush edit: unselected triangles go back to the part they were cut from, newly
+     *  selected ones join the part. */
+    bool applyPartEdit(int part, Sink* sink, int64_t& out, int64_t& in);
     /** 0 / 1 / 2: the axis the model is most symmetric across (through its centre). */
     int detectMirrorAxis();
     /** Centre of the model along an axis (the mirror plane used by mirror cuts). */
@@ -270,6 +276,7 @@ private:
     std::vector<std::shared_ptr<Chunk>> cpu_;   // geometry kept for editing and saving
     std::vector<std::shared_ptr<Chunk>> undo_;  // geometry before the last cut
     std::vector<std::shared_ptr<Chunk>> redo_;  // geometry after an undone cut
+    std::unordered_map<int, int> parentPart_;  // cut part -> the part it was cut from
     std::vector<std::vector<uint8_t>> tsel_, vsel_;  // brush selection per cpu_ chunk (triangles / vertices)
     void ensureSel_();
     void selToPreview_();

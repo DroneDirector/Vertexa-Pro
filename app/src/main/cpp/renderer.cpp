@@ -284,6 +284,7 @@ void Renderer::clearModel() {
         previewDirty_ = false;
         pmVerts_.clear();
         pmDirty_ = false;
+        parentPart_.clear();
         if (pmVbo_) glDeleteBuffers(1, &pmVbo_);
         if (pmVao_) glDeleteVertexArrays(1, &pmVao_);
         pmVbo_ = pmVao_ = 0;

@@ -528,6 +528,16 @@ JNIEXPORT jlongArray JNICALL FN(nativeMergeParts)(JNIEnv* env, jobject, jlong h,
     env->SetLongArrayRegion(arr, 0, 3, v);
     return arr;
 }
+JNIEXPORT jlong JNICALL FN(nativeEditPartSelection)(JNIEnv*, jobject, jlong h, jint part) { return E(h)->renderer.editPartSelection(part); }
+JNIEXPORT jlongArray JNICALL FN(nativeApplyPartEdit)(JNIEnv* env, jobject, jlong h, jint part) {
+    auto s = E(h)->sink();
+    int64_t out = 0, in = 0;
+    bool ok = E(h)->renderer.applyPartEdit(part, s.get(), out, in);
+    jlong v[3] = {ok ? 1 : 0, (jlong)out, (jlong)in};
+    jlongArray arr = env->NewLongArray(3);
+    env->SetLongArrayRegion(arr, 0, 3, v);
+    return arr;
+}
 JNIEXPORT jlong JNICALL FN(nativePartsTouch)(JNIEnv*, jobject, jlong h, jint a, jint b) { return E(h)->renderer.partsTouch(a, b); }
 JNIEXPORT jfloatArray JNICALL FN(nativeMirrorPoints)(JNIEnv* env, jobject, jlong h, jfloatArray pts, jint ax) {
     std::vector<float> p = floats(env, pts);

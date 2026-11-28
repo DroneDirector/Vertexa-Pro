@@ -47,6 +47,8 @@ object NativeBridge {
     @JvmStatic external fun nativeClearSelection(h: Long)
     @JvmStatic external fun nativeSeparateSelection(h: Long, name: String): String
     @JvmStatic external fun nativeMergeParts(h: Long, a: Int, b: Int, connect: Boolean): LongArray
+    @JvmStatic external fun nativeEditPartSelection(h: Long, part: Int): Long
+    @JvmStatic external fun nativeApplyPartEdit(h: Long, part: Int): LongArray
     @JvmStatic external fun nativePartsTouch(h: Long, a: Int, b: Int): Long
     @JvmStatic external fun nativeMirrorPoints(h: Long, pts: FloatArray, axis: Int): FloatArray
     @JvmStatic external fun nativeSetOrtho(h: Long, on: Boolean)
