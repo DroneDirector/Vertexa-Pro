@@ -59,6 +59,7 @@ public:
         int onlyPart = -1;          // >= 0: cut only this part
         float depthLo = 0.f, depthHi = 1.f;  // part of the model's depth (front 0 → back 1) the cut may reach
         std::vector<float> erase;            // spheres (x, y, z, radius) painted out of the cut
+        bool previewOnly = false;   // exact preview: compute the cut and show it, change nothing
         bool keepUndo = true;       // false for the second half of a mirrored cut (undo covers both)
     };
     struct CutResult {
@@ -70,6 +71,8 @@ public:
     CutResult cut(const CutRequest& req, Sink* sink);
     /** Highlights the triangles a cut would take (no changes made); empty request clears it. */
     void previewCut(const CutRequest& req);
+    /** Drops the exact cut preview. */
+    void clearExactPreview();
     bool undoCut(Sink* sink);
     bool redoCut(Sink* sink);
     bool hasUndo() { std::lock_guard<std::mutex> l(dataMu_); return !undo_.empty(); }
@@ -270,6 +273,11 @@ private:
     std::vector<std::vector<uint8_t>> tsel_, vsel_;  // brush selection per cpu_ chunk (triangles / vertices)
     void ensureSel_();
     void selToPreview_();
+    // exact cut preview: the very pieces the cut would take, split along the outline
+    std::vector<Vertex> pmVerts_;
+    bool pmDirty_ = false;
+    GLuint pmVao_ = 0, pmVbo_ = 0;
+    GLsizei pmCount_ = 0;
     std::vector<std::vector<uint32_t>> preview_;  // per cpu_ chunk: triangle indices a pending cut would take
     bool previewDirty_ = false;
     std::vector<GLuint> previewIbo_;

@@ -251,7 +251,7 @@ fun CreatePartCard(c: ViewerController, p: Palette) {
                     Column(
                         Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp))
                             .then(if (sel) Modifier.background(p.accentBrush) else Modifier.background(p.glass).border(1.dp, p.border, RoundedCornerShape(16.dp)))
-                            .pressable { mode = m }.padding(12.dp),
+                            .pressable { mode = m; c.cutMode = m; c.schedulePreview() }.padding(12.dp),
                     ) {
                         Text(label, color = if (sel) Color.White else p.text, fontWeight = FontWeight.Bold, fontSize = 15.sp)
                         Text(desc, color = if (sel) Color.White.copy(alpha = 0.88f) else p.muted, fontSize = 12.sp)

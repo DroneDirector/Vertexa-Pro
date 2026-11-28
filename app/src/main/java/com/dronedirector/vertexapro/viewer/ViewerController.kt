@@ -618,8 +618,16 @@ class ViewerController(
         if (cutTool == TOOL_BRUSH && brushSelCount == 0L && cutPoints.size >= 3) {
             // the outline's orange area becomes a polygon selection that the brush can add to and erase from
             scope.launch {
-                previewJob?.join()
-                val n = withContext(Dispatchers.Default) { safe { NativeBridge.nativeSelectionFromPreview(handle) } } ?: 0L
+                previewJob?.cancel()
+                val flat = FloatArray(cutPoints.size * 3)
+                cutPoints.forEachIndexed { i, pt -> System.arraycopy(pt, 0, flat, i * 3, 3) }
+                val er = eraseArray()
+                val lo = depthLo
+                val hi = depthHi
+                val n = withContext(Dispatchers.Default) {
+                    safe { NativeBridge.nativePreviewCut(handle, flat, lo, hi, er, 0, false) }
+                    safe { NativeBridge.nativeSelectionFromPreview(handle) }
+                } ?: 0L
                 if (n > 0) {
                     brushSelCount = n
                     pushOutlineHistory()
@@ -1330,23 +1338,24 @@ class ViewerController(
         previewJob?.cancel()
         if (brushSelCount > 0) return
         if (!cutActive || cutPoints.size < 3) { clearPreview(); return }
-        val flat = FloatArray(cutPoints.size * 3)
-        cutPoints.forEachIndexed { i, p -> System.arraycopy(p, 0, flat, i * 3, 3) }
+        val flat = cutOutline()  // the same smoothed outline the cut will use
         val lo = depthLo
         val hi = depthHi
         val er = eraseArray()
         if (brushSelCount > 0) return
         if (linesOnly) { clearPreview(); return }
+        val mode = cutMode
         previewJob = scope.launch {
-            delay(120)
-            withContext(Dispatchers.Default) { safe { NativeBridge.nativePreviewCut(handle, flat, lo, hi, er) } }
+            delay(150)
+            // exact preview: the real cut as a dry run, split right along the drawn line
+            withContext(Dispatchers.Default) { safe { NativeBridge.nativePreviewCut(handle, flat, lo, hi, er, mode, true) } }
             view?.requestRender()
         }
     }
 
     private fun clearPreview() {
         previewJob?.cancel()
-        safe { NativeBridge.nativePreviewCut(handle, null, 0f, 1f, null) }
+        safe { NativeBridge.nativePreviewCut(handle, null, 0f, 1f, null, 0, false) }
         view?.requestRender()
     }
 

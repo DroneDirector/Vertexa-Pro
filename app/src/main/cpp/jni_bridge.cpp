@@ -283,7 +283,8 @@ static std::vector<float> floats(JNIEnv* env, jfloatArray a) {
     return v;
 }
 
-JNIEXPORT void JNICALL FN(nativePreviewCut)(JNIEnv* env, jobject, jlong h, jfloatArray pts, jfloat lo, jfloat hi, jfloatArray erase) {
+JNIEXPORT void JNICALL FN(nativePreviewCut)(JNIEnv* env, jobject, jlong h, jfloatArray pts, jfloat lo, jfloat hi, jfloatArray erase,
+                                            jint mode, jboolean exact) {
     Renderer::CutRequest req;
     req.erase = floats(env, erase);
     if (pts) {
@@ -293,6 +294,17 @@ JNIEXPORT void JNICALL FN(nativePreviewCut)(JNIEnv* env, jobject, jlong h, jfloa
     }
     req.depthLo = lo;
     req.depthHi = hi;
+    if (exact && req.points.size() >= 9) {
+        // the real cut, dry run: shows exactly what will be cut, split along the outline
+        req.mode = mode;
+        req.previewOnly = true;
+        req.keepUndo = false;
+        auto s = E(h)->sink();
+        auto r = E(h)->renderer.cut(req, s.get());
+        if (!r.error.empty()) E(h)->renderer.clearExactPreview();
+        return;
+    }
+    E(h)->renderer.clearExactPreview();
     E(h)->renderer.previewCut(req);
 }
 

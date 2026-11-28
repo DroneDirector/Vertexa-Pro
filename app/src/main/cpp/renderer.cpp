@@ -282,6 +282,12 @@ void Renderer::clearModel() {
         previewIbo_.clear();
         previewCount_.clear();
         previewDirty_ = false;
+        pmVerts_.clear();
+        pmDirty_ = false;
+        if (pmVbo_) glDeleteBuffers(1, &pmVbo_);
+        if (pmVao_) glDeleteVertexArrays(1, &pmVao_);
+        pmVbo_ = pmVao_ = 0;
+        pmCount_ = 0;
     }
     anim_.reset();
     std::vector<GLuint> uniq;
@@ -578,6 +584,8 @@ bool Renderer::draw(Sink* sink, double now) {
             rebuildGpu_ = false;
             preview_.clear();
             previewDirty_ = true;
+            pmVerts_.clear();
+            pmDirty_ = true;
             more = true;
         }
     }
@@ -596,6 +604,29 @@ bool Renderer::draw(Sink* sink, double now) {
             }
             glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
             previewDirty_ = false;
+            more = true;
+        }
+        if (dl.owns_lock() && pmDirty_) {
+            if (!pmVao_) {
+                glGenVertexArrays(1, &pmVao_);
+                glGenBuffers(1, &pmVbo_);
+                glBindVertexArray(pmVao_);
+                glBindBuffer(GL_ARRAY_BUFFER, pmVbo_);
+                glEnableVertexAttribArray(0);
+                glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)0);
+                glEnableVertexAttribArray(1);
+                glVertexAttribPointer(1, 4, GL_INT_2_10_10_10_REV, GL_TRUE, sizeof(Vertex), (void*)12);
+                glEnableVertexAttribArray(2);
+                glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)16);
+                glEnableVertexAttribArray(3);
+                glVertexAttribPointer(3, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(Vertex), (void*)24);
+                glBindVertexArray(0);
+            }
+            glBindBuffer(GL_ARRAY_BUFFER, pmVbo_);
+            glBufferData(GL_ARRAY_BUFFER, pmVerts_.size() * sizeof(Vertex), pmVerts_.empty() ? nullptr : pmVerts_.data(), GL_DYNAMIC_DRAW);
+            glBindBuffer(GL_ARRAY_BUFFER, 0);
+            pmCount_ = (GLsizei)pmVerts_.size();
+            pmDirty_ = false;
             more = true;
         }
     }
@@ -895,6 +926,23 @@ void Renderer::renderScene(const Frame& f, int w, int h, bool background, bool a
             glDrawElements(GL_TRIANGLES, previewCount_[i], GL_UNSIGNED_INT, nullptr);
             glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g.ibo);
         }
+        glDisable(GL_POLYGON_OFFSET_FILL);
+        glDisable(GL_BLEND);
+    }
+    if (!f.noOverlay && pmCount_ > 0 && pmVao_) {
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glEnable(GL_POLYGON_OFFSET_FILL);
+        glPolygonOffset(-1.0f, -2.0f);
+        glUniform1i(uShade, 2);
+        float pc[4] = {1.0f, 0.55f, 0.1f, 0.45f};
+        glUniform4fv(uLine, 1, pc);
+        glUniform1f(uSel, 0.f);
+        Gpu pg;
+        pg.part = -1;
+        setXf(pg);
+        glBindVertexArray(pmVao_);
+        glDrawArrays(GL_TRIANGLES, 0, pmCount_);
         glDisable(GL_POLYGON_OFFSET_FILL);
         glDisable(GL_BLEND);
     }

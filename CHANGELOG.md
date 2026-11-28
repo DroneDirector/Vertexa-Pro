@@ -2,6 +2,11 @@
 
 ## Next
 
+- Points snap only to the surface you're looking at: from above they land on the top skin, from below on the bottom — never on corners of the far side
+- The orange preview now shows the exact cut: split right along the drawn line, with the cut mode you pick — no more jagged triangle edges
+
+## 1.0.17
+
 - Hidden parts can always be shown again: a bar at the bottom lists the hidden parts — tap one to bring it back, or Show all
 
 ## 1.0.16

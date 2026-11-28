@@ -344,6 +344,35 @@ bool Renderer::snapPoint(float sx, float sy, float snapPx, bool corners, bool ed
         hidden = hidden_;
     }
     std::lock_guard<std::mutex> dl(dataMu_);
+    // distance along a ray to the nearest visible triangle (1e300 when nothing is hit)
+    auto rayNearest = [&](const V3& ro, const V3& rd) {
+        double bt = 1e300;
+        for (auto& cp : cpu_) {
+            const Chunk& c = *cp;
+            if (c.points) continue;
+            if (c.part >= 0 && c.part < (int)hidden.size() && hidden[c.part]) continue;
+            for (size_t t = 0; t + 2 < c.tris.size(); t += 3) {
+                const float* a = c.verts[c.tris[t]].p;
+                const float* b = c.verts[c.tris[t + 1]].p;
+                const float* e = c.verts[c.tris[t + 2]].p;
+                V3 A(a[0], a[1], a[2]);
+                V3 e1 = V3(b[0], b[1], b[2]) - A, e2 = V3(e[0], e[1], e[2]) - A;
+                V3 pp = rd.cross(e2);
+                double det = e1.dot(pp);
+                if (std::fabs(det) < 1e-20) continue;
+                double inv = 1.0 / det;
+                V3 sv = ro - A;
+                double u = sv.dot(pp) * inv;
+                if (u < 0 || u > 1) continue;
+                V3 q = sv.cross(e1);
+                double v = rd.dot(q) * inv;
+                if (v < 0 || u + v > 1) continue;
+                double tt = e2.dot(q) * inv;
+                if (tt > 0 && tt < bt) bt = tt;
+            }
+        }
+        return bt;
+    };
     double best = 1e300;
     V3 hitTri[3];
     for (auto& cp : cpu_) {
@@ -395,17 +424,41 @@ bool Renderer::snapPoint(float sx, float sy, float snapPx, bool corners, bool ed
         return true;
     };
     if (corners) {
-        // nearest mesh corner on the same surface (close in depth to the hit)
+        // nearest mesh corner on the surface you're looking at: facing the camera, close in depth to the hit,
+        // and not hidden behind anything (checked with a ray) — never the skin underneath
+        auto unpackN = [](uint32_t n) {
+            auto q = [](uint32_t v) { int i = (int)(v & 0x3FF); if (i & 0x200) i -= 0x400; return i / 511.0; };
+            return V3(q(n), q(n >> 10), q(n >> 20));
+        };
+        struct CandV { double px; V3 p; };
+        std::vector<CandV> cands;
+        double ctol = cc.radius * 0.012;
         for (auto& cp : cpu_) {
             const Chunk& c = *cp;
             if (c.points) continue;
             if (c.part >= 0 && c.part < (int)hidden.size() && hidden[c.part]) continue;
             for (auto& v : c.verts) {
                 V3 p(v.p[0], v.p[1], v.p[2]);
-                if (std::fabs((p - o).dot(cc.fwd) - hitDepth) > tol) continue;
+                if (std::fabs((p - o).dot(cc.fwd) - hitDepth) > ctol) continue;
+                V3 view = cc.ortho ? cc.fwd : (p - cc.eye).norm();
+                if (unpackN(v.n).dot(view) > 0.05) continue;  // faces away: the far side
                 double px;
-                if (screenDist(p, px) && px < bestPx) { bestPx = px; snapped = p; found = true; }
+                if (screenDist(p, px) && px < bestPx) cands.push_back({px, p});
             }
+        }
+        std::sort(cands.begin(), cands.end(), [](const CandV& a, const CandV& b) { return a.px < b.px; });
+        for (size_t k = 0; k < cands.size() && k < 4 && !found; k++) {
+            float f3[3] = {(float)cands[k].p.x, (float)cands[k].p.y, (float)cands[k].p.z};
+            double qx, qy;
+            if (!projectCC(cc, f3, qx, qy)) continue;
+            V3 o2, d2;
+            cc.ray(qx, qy, o2, d2);
+            double t2 = rayNearest(o2, d2);
+            double want = (cands[k].p - o2).dot(d2);
+            if (t2 < 1e299 && std::fabs(t2 - want) > ctol * 0.5) continue;  // something is in front of it
+            snapped = cands[k].p;
+            bestPx = cands[k].px;
+            found = true;
         }
     }
     if (!found && edges) {
@@ -555,7 +608,7 @@ Renderer::CutResult Renderer::cut(const CutRequest& req, Sink* sink) {
         std::lock_guard<std::mutex> l(mu_);
         hidden = hidden_;
     }
-    int newPart = sink->addPart(req.name.empty() ? "Cut part" : req.name);
+    int newPart = req.previewOnly ? -1 : sink->addPart(req.name.empty() ? "Cut part" : req.name);
 
     std::lock_guard<std::mutex> dl(dataMu_);
     if (!keepCpu_ || cpu_.empty()) {
@@ -745,6 +798,19 @@ Renderer::CutResult Renderer::cut(const CutRequest& req, Sink* sink) {
             else w.keep.insert(w.keep.end(), tr, tr + 3);
         }
         for (size_t wi = 0; wi < works.size(); wi++) works[wi].cut.swap(newCut[wi]);
+    }
+
+    if (req.previewOnly) {
+        // the exact pieces, split along the outline, shown in orange; nothing is changed
+        std::vector<Vertex> pv;
+        for (auto& w : works) for (uint32_t i : w.cut) pv.push_back(w.verts[i]);
+        res.triangles = (int64_t)pv.size() / 3;
+        pmVerts_.swap(pv);
+        pmDirty_ = true;
+        preview_.clear();
+        previewDirty_ = true;
+        res.part = 0;
+        return res;
     }
 
     // ---- seal: find open cut edges of the new part and cap them
@@ -1010,6 +1076,12 @@ void Renderer::previewCut(const CutRequest& req) {
     std::lock_guard<std::mutex> dl(dataMu_);
     preview_.clear();
     previewDirty_ = true;
+}
+
+void Renderer::clearExactPreview() {
+    std::lock_guard<std::mutex> dl(dataMu_);
+    pmVerts_.clear();
+    pmDirty_ = true;
 }
 
 void Renderer::deletePart(int part, Sink* sink) {
