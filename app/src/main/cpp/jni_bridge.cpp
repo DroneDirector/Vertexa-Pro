@@ -274,10 +274,24 @@ JNIEXPORT jstring JNICALL FN(nativeExportGlb)(JNIEnv* env, jobject, jlong h, jin
     return env->NewStringUTF(safeUtf8(err).c_str());
 }
 
+JNIEXPORT void JNICALL FN(nativePreviewCut)(JNIEnv* env, jobject, jlong h, jfloatArray pts, jfloat lo, jfloat hi) {
+    Renderer::CutRequest req;
+    if (pts) {
+        jsize n = env->GetArrayLength(pts);
+        req.points.resize(n);
+        if (n) env->GetFloatArrayRegion(pts, 0, n, req.points.data());
+    }
+    req.depthLo = lo;
+    req.depthHi = hi;
+    E(h)->renderer.previewCut(req);
+}
+
 JNIEXPORT jstring JNICALL FN(nativeCut)(JNIEnv* env, jobject, jlong h, jfloatArray pts, jint mode, jstring name,
-                                        jint mirrorAxis, jboolean keepUndo, jint onlyPart) {
+                                        jint mirrorAxis, jboolean keepUndo, jint onlyPart, jfloat depthLo, jfloat depthHi) {
     Renderer::CutRequest req;
     req.onlyPart = onlyPart;
+    req.depthLo = depthLo;
+    req.depthHi = depthHi;
     req.mirrorAxis = mirrorAxis;
     req.keepUndo = keepUndo;
     jsize n = env->GetArrayLength(pts);

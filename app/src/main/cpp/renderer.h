@@ -57,6 +57,7 @@ public:
         std::string name;
         int mirrorAxis = -1;        // 0/1/2: cut the mirror image across the model's centre on that axis
         int onlyPart = -1;          // >= 0: cut only this part
+        float depthLo = 0.f, depthHi = 1.f;  // part of the model's depth (front 0 → back 1) the cut may reach
         bool keepUndo = true;       // false for the second half of a mirrored cut (undo covers both)
     };
     struct CutResult {
@@ -66,6 +67,8 @@ public:
     };
     bool canEdit() { std::lock_guard<std::mutex> l(dataMu_); return keepCpu_ && !cpu_.empty() && !animated_; }
     CutResult cut(const CutRequest& req, Sink* sink);
+    /** Highlights the triangles a cut would take (no changes made); empty request clears it. */
+    void previewCut(const CutRequest& req);
     bool undoCut(Sink* sink);
     bool redoCut(Sink* sink);
     bool hasUndo() { std::lock_guard<std::mutex> l(dataMu_); return !undo_.empty(); }
@@ -247,6 +250,10 @@ private:
     std::vector<std::shared_ptr<Chunk>> cpu_;   // geometry kept for editing and saving
     std::vector<std::shared_ptr<Chunk>> undo_;  // geometry before the last cut
     std::vector<std::shared_ptr<Chunk>> redo_;  // geometry after an undone cut
+    std::vector<std::vector<uint32_t>> preview_;  // per cpu_ chunk: triangle indices a pending cut would take
+    bool previewDirty_ = false;
+    std::vector<GLuint> previewIbo_;
+    std::vector<GLsizei> previewCount_;
     bool keepCpu_ = true;
     bool animated_ = false;
     std::shared_ptr<AnimData> anim_;

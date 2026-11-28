@@ -69,6 +69,39 @@ object CutGeometry {
         }
     }
 
+    /** Douglas-Peucker simplification of a closed stroke down to its key corners. */
+    fun keyPoints(xy: FloatArray, tolPx: Float): FloatArray {
+        val n = xy.size / 2
+        if (n <= 4) return xy
+        val keep = BooleanArray(n)
+        keep[0] = true
+        keep[n - 1] = true
+        fun dp(a: Int, b: Int) {
+            var best = -1f
+            var idx = -1
+            val ax = xy[a * 2]; val ay = xy[a * 2 + 1]; val bx = xy[b * 2]; val by = xy[b * 2 + 1]
+            val L = hypot(bx - ax, by - ay).coerceAtLeast(1e-6f)
+            for (i in a + 1 until b) {
+                val d = kotlin.math.abs((bx - ax) * (ay - xy[i * 2 + 1]) - (ax - xy[i * 2]) * (by - ay)) / L
+                if (d > best) { best = d; idx = i }
+            }
+            if (idx >= 0 && best > tolPx) { keep[idx] = true; dp(a, idx); dp(idx, b) }
+        }
+        dp(0, n - 1)
+        val out = ArrayList<Float>()
+        for (i in 0 until n) if (keep[i]) { out += xy[i * 2]; out += xy[i * 2 + 1] }
+        return out.toFloatArray()
+    }
+
+    /** Distance from (x, y) to segment a-b in pixels, and the position along it (0..1). */
+    fun segDist(x: Float, y: Float, ax: Float, ay: Float, bx: Float, by: Float): Pair<Float, Float> {
+        val dx = bx - ax
+        val dy = by - ay
+        val L2 = dx * dx + dy * dy
+        val t = if (L2 > 0) (((x - ax) * dx + (y - ay) * dy) / L2).coerceIn(0f, 1f) else 0f
+        return hypot(x - (ax + dx * t), y - (ay + dy * t)) to t
+    }
+
     /** Offsets a closed polygon outward (d > 0) or inward (d < 0) by d pixels. */
     fun offset(xy: FloatArray, d: Float): FloatArray {
         val n = xy.size / 2

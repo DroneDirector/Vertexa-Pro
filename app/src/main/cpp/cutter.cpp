@@ -514,6 +514,30 @@ Renderer::CutResult Renderer::cut(const CutRequest& req, Sink* sink) {
     }
     const double perimeter = std::max(cum[n], 1e-9);
     const double eps = cc.radius * 1e-7;
+    // depth window along the view (front 0 → back 1 of the model)
+    bool limitDepth = req.depthLo > 0.001f || req.depthHi < 0.999f;
+    double dLo = -1e300, dHi = 1e300;
+    if (limitDepth) {
+        Bounds b;
+        {
+            std::lock_guard<std::mutex> l(mu_);
+            b = bounds_;
+        }
+        double mn = 1e300, mx = -1e300;
+        for (int k = 0; k < 8; k++) {
+            V3 c(k & 1 ? b.mx[0] : b.mn[0], k & 2 ? b.mx[1] : b.mn[1], k & 4 ? b.mx[2] : b.mn[2]);
+            double d = (c - cc.eye).dot(cc.fwd);
+            mn = std::min(mn, d);
+            mx = std::max(mx, d);
+        }
+        dLo = mn + (mx - mn) * req.depthLo;
+        dHi = mn + (mx - mn) * req.depthHi;
+    }
+    auto inDepth = [&](const float* p) {
+        if (!limitDepth) return true;
+        double d = (V3(p[0], p[1], p[2]) - cc.eye).dot(cc.fwd);
+        return d >= dLo && d <= dHi;
+    };
 
     std::vector<uint8_t> hidden;
     {
@@ -610,7 +634,7 @@ Renderer::CutResult Renderer::cut(const CutRequest& req, Sink* sink) {
                 for (auto& v : pp) { cx += v.v.p[0]; cy += v.v.p[1]; cz += v.v.p[2]; }
                 float cen[3] = {(float)(cx / pp.size()), (float)(cy / pp.size()), (float)(cz / pp.size())};
                 double px, py;
-                bool inside = projectCC(cc, cen, px, py) && pointInPoly(px, py, lasso);
+                bool inside = projectCC(cc, cen, px, py) && pointInPoly(px, py, lasso) && inDepth(cen);
                 std::vector<uint32_t>& dst = inside ? w.cut : w.keep;
                 uint32_t i0 = addVert(pp[0]);
                 for (size_t k = 1; k + 1 < pp.size(); k++) {
@@ -904,6 +928,71 @@ Renderer::CutResult Renderer::cut(const CutRequest& req, Sink* sink) {
     sink->log(0, "Cut \"" + req.name + "\": " + std::to_string(cutTris) + " triangles moved to the new part, " +
                      std::to_string(caps.size()) + " triangles added to seal the cut.");
     return res;
+}
+
+void Renderer::previewCut(const CutRequest& req) {
+    size_t n = req.points.size() / 3;
+    std::vector<std::vector<uint32_t>> out;
+    CutCam cc;
+    if (n >= 3 && cutCamera(cc)) {
+        std::vector<double> lasso(n * 2);
+        bool ok = true;
+        double lminx = 1e300, lminy = 1e300, lmaxx = -1e300, lmaxy = -1e300;
+        for (size_t i = 0; i < n && ok; i++) {
+            ok = projectCC(cc, &req.points[i * 3], lasso[i * 2], lasso[i * 2 + 1]);
+            lminx = std::min(lminx, lasso[i * 2]); lmaxx = std::max(lmaxx, lasso[i * 2]);
+            lminy = std::min(lminy, lasso[i * 2 + 1]); lmaxy = std::max(lmaxy, lasso[i * 2 + 1]);
+        }
+        if (ok) {
+            bool limitDepth = req.depthLo > 0.001f || req.depthHi < 0.999f;
+            double dLo = -1e300, dHi = 1e300;
+            std::vector<uint8_t> hidden;
+            {
+                std::lock_guard<std::mutex> l(mu_);
+                hidden = hidden_;
+                if (limitDepth && bounds_.valid()) {
+                    double mn = 1e300, mx = -1e300;
+                    for (int k = 0; k < 8; k++) {
+                        V3 c(k & 1 ? bounds_.mx[0] : bounds_.mn[0], k & 2 ? bounds_.mx[1] : bounds_.mn[1], k & 4 ? bounds_.mx[2] : bounds_.mn[2]);
+                        double d = (c - cc.eye).dot(cc.fwd);
+                        mn = std::min(mn, d);
+                        mx = std::max(mx, d);
+                    }
+                    dLo = mn + (mx - mn) * req.depthLo;
+                    dHi = mn + (mx - mn) * req.depthHi;
+                }
+            }
+            std::lock_guard<std::mutex> dl(dataMu_);
+            out.resize(cpu_.size());
+            for (size_t ci = 0; ci < cpu_.size(); ci++) {
+                const Chunk& c = *cpu_[ci];
+                if (c.points || c.tris.empty()) continue;
+                if (c.part >= 0 && c.part < (int)hidden.size() && hidden[c.part]) continue;
+                if (req.onlyPart >= 0 && c.part != req.onlyPart) continue;
+                for (size_t t = 0; t + 2 < c.tris.size(); t += 3) {
+                    const float* a = c.verts[c.tris[t]].p;
+                    const float* b = c.verts[c.tris[t + 1]].p;
+                    const float* d = c.verts[c.tris[t + 2]].p;
+                    float cen[3] = {(a[0] + b[0] + d[0]) / 3, (a[1] + b[1] + d[1]) / 3, (a[2] + b[2] + d[2]) / 3};
+                    double px, py;
+                    if (!projectCC(cc, cen, px, py)) continue;
+                    if (px < lminx || px > lmaxx || py < lminy || py > lmaxy) continue;
+                    if (!pointInPoly(px, py, lasso)) continue;
+                    if (limitDepth) {
+                        double dd = (V3(cen[0], cen[1], cen[2]) - cc.eye).dot(cc.fwd);
+                        if (dd < dLo || dd > dHi) continue;
+                    }
+                    out[ci].insert(out[ci].end(), {c.tris[t], c.tris[t + 1], c.tris[t + 2]});
+                }
+            }
+            preview_.swap(out);
+            previewDirty_ = true;
+            return;
+        }
+    }
+    std::lock_guard<std::mutex> dl(dataMu_);
+    preview_.clear();
+    previewDirty_ = true;
 }
 
 void Renderer::deletePart(int part, Sink* sink) {

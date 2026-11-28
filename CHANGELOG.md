@@ -2,6 +2,10 @@
 
 ## Next
 
+- Edit the cut outline: tap a point to select it (and delete it), drag points to fine-tune them, tap on a line to add a point there
+- Rectangles become 4 draggable corners; ovals and freehand shapes become smooth curves through a few draggable points
+- Depth range for cuts: a two-handle slider limits how deep the cut reaches front-to-back, so things underneath aren't hit
+- Live orange preview of exactly what the cut will take while you adjust the outline or the depth
 - View presets (Top, Bottom, Front, Back, Left, Right) and a Flat view without perspective — also as quick buttons in the cut tool
 - New cut mode "Through the first object" (now the default): cuts the nearest object top and bottom, never what's behind it
 - Flap template: tap the trailing edge where the flap starts and ends, set the chord depth, and the outline is built for you

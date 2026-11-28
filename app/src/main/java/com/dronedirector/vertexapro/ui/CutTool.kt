@@ -156,9 +156,12 @@ fun CutOverlay(c: ViewerController, p: Palette) {
                 drawCircle(glow, 8.dp.toPx(), pt(0))
                 drawCircle(Color.White, 4.dp.toPx(), pt(0))
             } else {
-                drawCircle(Color.Black.copy(alpha = 0.35f), 7.dp.toPx(), pt(i))
-                drawCircle(p.accent, 5.dp.toPx(), pt(i))
-                drawCircle(Color.White, 2.dp.toPx(), pt(i))
+                drawCircle(Color.Black.copy(alpha = 0.35f), 9.dp.toPx(), pt(i))
+                drawCircle(p.accent, 7.dp.toPx(), pt(i))
+                drawCircle(Color.White, 2.5.dp.toPx(), pt(i))
+            }
+            if (i == c.selectedCutPoint) {
+                drawCircle(Color.White, 14.dp.toPx(), pt(i), style = androidx.compose.ui.graphics.drawscope.Stroke(2.5.dp.toPx()))
             }
         }
     }
@@ -204,6 +207,25 @@ fun CutToolbar(c: ViewerController, p: Palette) {
                 PillChip("Straight 45°", c.straightOn, p) { c.straightOn = !c.straightOn }
             }
         }
+        if (c.cutPoints.size >= 3 && c.cutShape != com.dronedirector.vertexapro.viewer.CutGeometry.FLAP) {
+            VSpace(6.dp)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.width(110.dp)) {
+                    Text("Depth", color = p.text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        if (c.depthLo <= 0.001f && c.depthHi >= 0.999f) "Whole model" else "${(c.depthLo * 100).toInt()}–${(c.depthHi * 100).toInt()}% deep",
+                        color = p.muted, fontSize = 11.sp,
+                    )
+                }
+                androidx.compose.material3.RangeSlider(
+                    value = c.depthLo..c.depthHi,
+                    onValueChange = { r -> c.updateDepth(r.start, r.endInclusive) },
+                    modifier = Modifier.weight(1f),
+                    colors = androidx.compose.material3.SliderDefaults.colors(thumbColor = p.accent, activeTrackColor = p.accent2, inactiveTrackColor = p.border),
+                )
+            }
+            Text("Orange shows what will be cut. Front = nearest to you.", color = p.muted, fontSize = 11.sp)
+        }
         if (c.cutShape == com.dronedirector.vertexapro.viewer.CutGeometry.FLAP && c.cutPoints.size >= 2) {
             VSpace(8.dp)
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -223,6 +245,7 @@ fun CutToolbar(c: ViewerController, p: Palette) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             ToolIcon(Icons.AutoMirrored.Outlined.Undo, "Undo", c.canUndoPoint, p) { c.undoCutPoint() }
             ToolIcon(Icons.AutoMirrored.Outlined.Redo, "Redo", c.canRedoPoint, p) { c.redoCutPoint() }
+            if (c.selectedCutPoint >= 0) PillChip("Delete point", false, p) { c.deleteSelectedPoint() }
             if (c.cutShape <= 1 && c.cutPoints.size >= 3) PillChip("Close outline", false, p) { c.askConnect = true }
             Spacer(Modifier.weight(1f))
             PillChip("Cancel", false, p) { c.cancelCut() }

@@ -277,6 +277,11 @@ void Renderer::clearModel() {
         keepCpu_ = true;
         rebuildGpu_ = false;
         animated_ = false;
+        preview_.clear();
+        for (GLuint b : previewIbo_) if (b) glDeleteBuffers(1, &b);
+        previewIbo_.clear();
+        previewCount_.clear();
+        previewDirty_ = false;
     }
     anim_.reset();
     std::vector<GLuint> uniq;
@@ -571,6 +576,26 @@ bool Renderer::draw(Sink* sink, double now) {
             gpu_.clear();
             for (auto& c : cpu_) uploadGpu(*c);
             rebuildGpu_ = false;
+            preview_.clear();
+            previewDirty_ = true;
+            more = true;
+        }
+    }
+    {
+        std::unique_lock<std::mutex> dl(dataMu_, std::try_to_lock);
+        if (dl.owns_lock() && previewDirty_) {
+            for (GLuint b : previewIbo_) if (b) glDeleteBuffers(1, &b);
+            previewIbo_.assign(preview_.size(), 0);
+            previewCount_.assign(preview_.size(), 0);
+            for (size_t i = 0; i < preview_.size(); i++) {
+                if (preview_[i].empty()) continue;
+                glGenBuffers(1, &previewIbo_[i]);
+                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, previewIbo_[i]);
+                glBufferData(GL_ELEMENT_ARRAY_BUFFER, preview_[i].size() * 4, preview_[i].data(), GL_STATIC_DRAW);
+                previewCount_[i] = (GLsizei)preview_[i].size();
+            }
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+            previewDirty_ = false;
             more = true;
         }
     }
@@ -849,6 +874,28 @@ void Renderer::renderScene(const Frame& f, int w, int h, bool background, bool a
             glDrawElements(GL_LINES, g.lineCount, GL_UNSIGNED_INT, nullptr);
             glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g.ibo);
         }
+        glDisable(GL_BLEND);
+    }
+    // cut preview: what the pending cut would take, in orange on top
+    if (!previewCount_.empty() && previewCount_.size() == gpu_.size()) {
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glEnable(GL_POLYGON_OFFSET_FILL);
+        glPolygonOffset(-1.0f, -2.0f);
+        glUniform1i(uShade, 2);
+        float pc[4] = {1.0f, 0.55f, 0.1f, 0.45f};
+        glUniform4fv(uLine, 1, pc);
+        glUniform1f(uSel, 0.f);
+        for (size_t i = 0; i < gpu_.size(); i++) {
+            const Gpu& g = gpu_[i];
+            if (!previewCount_[i] || partHidden(f, g.part)) continue;
+            setXf(g);
+            glBindVertexArray(g.vao);
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, previewIbo_[i]);
+            glDrawElements(GL_TRIANGLES, previewCount_[i], GL_UNSIGNED_INT, nullptr);
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g.ibo);
+        }
+        glDisable(GL_POLYGON_OFFSET_FILL);
         glDisable(GL_BLEND);
     }
     for (auto& g : gpu_) {

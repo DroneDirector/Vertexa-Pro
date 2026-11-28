@@ -152,6 +152,15 @@ class ViewerController(
     var mirrorAuto by mutableStateOf(true)
     /** Gap between a cut part and the model, in millimetres (0 = none). */
     var gapMm by mutableFloatStateOf(0f)
+    /** How deep the cut may reach, as a share of the model's depth seen from the camera (front 0 → back 1). */
+    var depthLo by mutableFloatStateOf(0f)
+    var depthHi by mutableFloatStateOf(1f)
+    /** Point of the outline that is selected / being dragged (-1 none). */
+    var selectedCutPoint by mutableIntStateOf(-1)
+    private var dragIndex = -1
+    private var dragMoved = false
+    private var dragBusy = false
+    private var previewJob: Job? = null
     // flap template (trailing-edge strip)
     var flapDepth by mutableFloatStateOf(0.25f)
     var flapPreview by mutableStateOf(FloatArray(0))
@@ -679,6 +688,10 @@ class ViewerController(
     }
 
     fun cancelCut() {
+        clearPreview()
+        selectedCutPoint = -1
+        depthLo = 0f
+        depthHi = 1f
         cutActive = false
         flapPreview = FloatArray(0)
         cutPoints.clear()
@@ -715,7 +728,9 @@ class ViewerController(
         cutPoints.clear()
         cutPoints.addAll(prev)
         askConnect = false
+        selectedCutPoint = -1
         syncHistory()
+        schedulePreview()
     }
 
     fun redoCutPoint() {
@@ -725,7 +740,9 @@ class ViewerController(
         cutPoints.clear()
         cutPoints.addAll(next)
         askConnect = false
+        selectedCutPoint = -1
         syncHistory()
+        schedulePreview()
     }
 
     /** Screen positions of the cut points for the overlay (NaN when behind the camera). */
@@ -745,7 +762,9 @@ class ViewerController(
                 askConnect = true
                 return
             }
+            if (insertOnSegment(x, y)) return
         }
+        selectedCutPoint = -1
         var tx = x
         var ty = y
         if (straightOn && cutPoints.isNotEmpty()) {
@@ -766,6 +785,7 @@ class ViewerController(
             } else {
                 pushOutlineHistory()
                 cutPoints.add(hit)
+                schedulePreview()
                 cutHint = when {
                     cutPoints.size < 3 -> "Keep tapping around the area (${cutPoints.size} point${if (cutPoints.size > 1) "s" else ""})."
                     else -> "Tap near the first point to close the outline."
@@ -773,6 +793,117 @@ class ViewerController(
             }
             view?.requestRender()
         }
+    }
+
+    // ---- editing the outline: select, drag, insert, delete
+    /** Index of the outline point under the finger, or -1. */
+    fun cutHandleAt(x: Float, y: Float): Int {
+        if (!cutActive || cutPoints.isEmpty() || askConnect || createPartOpen || cutBusy) return -1
+        val pr = projectCutPoints()
+        val r = 24 * context.resources.displayMetrics.density
+        var best = -1
+        var bestD = r
+        for (i in 0 until pr.size / 2) {
+            if (pr[i * 2].isNaN()) continue
+            val d = kotlin.math.hypot(pr[i * 2] - x, pr[i * 2 + 1] - y)
+            if (d < bestD) { bestD = d; best = i }
+        }
+        return best
+    }
+
+    fun beginDragPoint(i: Int) {
+        dragIndex = i
+        dragMoved = false
+        selectedCutPoint = i
+        pushOutlineHistory()
+    }
+
+    fun dragPoint(x: Float, y: Float) {
+        val i = dragIndex
+        if (i < 0 || i >= cutPoints.size || dragBusy) return
+        dragMoved = true
+        dragBusy = true
+        val density = context.resources.displayMetrics.density
+        scope.launch {
+            val hit = withContext(Dispatchers.Default) {
+                safe { NativeBridge.nativeSnap(handle, x, y, if (snapOn) 12 * density else 0f, snapOn, snapOn) }
+                    ?: safe { NativeBridge.nativeUnproject(handle, floatArrayOf(x, y)) }
+            }
+            if (hit != null && i < cutPoints.size) cutPoints[i] = hit
+            dragBusy = false
+            schedulePreview()
+        }
+    }
+
+    fun endDragPoint() {
+        if (!dragMoved) {
+            // a tap on a point: undo the history entry made for the drag, keep it selected
+            if (outlineUndo.isNotEmpty()) { outlineUndo.removeAt(outlineUndo.size - 1); syncHistory() }
+        }
+        dragIndex = -1
+    }
+
+    fun deleteSelectedPoint() {
+        val i = selectedCutPoint
+        if (i < 0 || i >= cutPoints.size) return
+        pushOutlineHistory()
+        cutPoints.removeAt(i)
+        selectedCutPoint = -1
+        schedulePreview()
+    }
+
+    /** Tap near a line of a closed / 3+ point outline: adds a point there instead of at the end. */
+    private fun insertOnSegment(x: Float, y: Float): Boolean {
+        if (cutPoints.size < 3) return false
+        val pr = projectCutPoints()
+        if (pr.any { it.isNaN() }) return false
+        val r = 14 * context.resources.displayMetrics.density
+        val n = pr.size / 2
+        var best = -1
+        var bestD = r
+        for (i in 0 until n) {
+            val j = (i + 1) % n
+            val (d, t) = CutGeometry.segDist(x, y, pr[i * 2], pr[i * 2 + 1], pr[j * 2], pr[j * 2 + 1])
+            if (d < bestD && t > 0.05f && t < 0.95f) { bestD = d; best = i }
+        }
+        if (best < 0) return false
+        scope.launch {
+            val hit = withContext(Dispatchers.Default) {
+                safe { NativeBridge.nativeRaycast(handle, x, y) } ?: safe { NativeBridge.nativeUnproject(handle, floatArrayOf(x, y)) }
+            } ?: return@launch
+            pushOutlineHistory()
+            cutPoints.add(best + 1, hit)
+            selectedCutPoint = best + 1
+            schedulePreview()
+        }
+        return true
+    }
+
+    fun updateDepth(lo: Float, hi: Float) {
+        depthLo = lo
+        depthHi = hi
+        schedulePreview()
+    }
+
+    /** Shows in orange what the cut would take, a moment after the outline or depth changes. */
+    fun schedulePreview() {
+        previewJob?.cancel()
+        if (!cutActive || cutPoints.size < 3) { clearPreview(); return }
+        val flat = FloatArray(cutPoints.size * 3)
+        cutPoints.forEachIndexed { i, p -> System.arraycopy(p, 0, flat, i * 3, 3) }
+        val lo = depthLo
+        val hi = depthHi
+        previewJob = scope.launch {
+            delay(120)
+            withContext(Dispatchers.Default) { safe { NativeBridge.nativePreviewCut(handle, flat, lo, hi) } }
+            view?.requestRender()
+        }
+    }
+
+    private fun clearPreview() {
+        previewJob?.cancel()
+        safe { NativeBridge.nativePreviewCut(handle, null, 0f, 1f) }
+        view?.requestRender()
     }
 
     /** True while one-finger drags draw a shape instead of rotating the view. */
@@ -803,15 +934,23 @@ class ViewerController(
         drawPath = FloatArray(0)
         strokePts.clear()
         if (shape.size < 6) { cutHint = "Draw a larger shape around the area."; return }
-        val pts3 = safe { NativeBridge.nativeUnproject(handle, shape) } ?: return
+        val density = context.resources.displayMetrics.density
+        // turn the drawn shape into a few editable points: rectangles keep their corners,
+        // ovals and freehand strokes become smooth curves through key points
+        val editable = when (cutShape) {
+            CutGeometry.RECTANGLE -> shape
+            CutGeometry.ELLIPSE -> FloatArray(16) { k -> shape[((k / 2) * (shape.size / 2) / 8) * 2 + (k % 2)] }
+            else -> CutGeometry.keyPoints(shape, 3f * density).let { if (it.size >= 6) it else shape }
+        }
+        val drawnShape = cutShape
+        val pts3 = safe { NativeBridge.nativeUnproject(handle, editable) } ?: return
         pushOutlineHistory()
         cutPoints.clear()
         for (i in 0 until pts3.size / 3) cutPoints.add(floatArrayOf(pts3[i * 3], pts3[i * 3 + 1], pts3[i * 3 + 2]))
-        if (cutShape == CutGeometry.FREEHAND) {
-            askConnect = true  // "connect your last point with the start?"
-        } else {
-            createPartOpen = true
-        }
+        cutShape = if (drawnShape == CutGeometry.RECTANGLE) CutGeometry.POINTS else CutGeometry.CURVE
+        cutHint = "Drag the points to fine-tune, tap a line to add a point, then close the outline."
+        if (drawnShape == CutGeometry.FREEHAND) askConnect = true  // "connect your last point with the start?"
+        schedulePreview()
     }
 
     /** The outline that will actually be cut: curves are smoothed into many small segments. */
@@ -926,6 +1065,7 @@ class ViewerController(
         cutPoints.clear()
         for (i in 0 until pts3.size / 3) cutPoints.add(floatArrayOf(pts3[i * 3], pts3[i * 3 + 1], pts3[i * 3 + 2]))
         flapPreview = FloatArray(0)
+        schedulePreview()
         cutShape = CutGeometry.POINTS  // the outline is now a normal polygon
         cutMode = 3
         createPartOpen = true
@@ -1012,15 +1152,18 @@ class ViewerController(
         val mirror = if (mirrorCut) mirrorAxis else -1
         // gap: cut a slightly bigger outline, then the real part from inside it, and drop the thin band between
         val gapUnits = gapMm / 1000.0 / unitMeters()
+        val dLo = depthLo
+        val dHi = depthHi
+        clearPreview()
         val outlines: Pair<FloatArray, FloatArray>? = if (gapUnits > 0) gapOutlines(flat, gapUnits) else null
         scope.launch {
             val r = withContext(Dispatchers.Default) {
                 fun one(pName: String, mirrorAx: Int, keepUndo: Boolean): String {
-                    if (outlines == null) return safe { NativeBridge.nativeCut(handle, flat, mode, pName, mirrorAx, keepUndo, -1) } ?: "ERR|Cancelled"
-                    val outer = safe { NativeBridge.nativeCut(handle, outlines.first, mode, "$pName (gap)", mirrorAx, keepUndo, -1) } ?: "ERR|Cancelled"
+                    if (outlines == null) return safe { NativeBridge.nativeCut(handle, flat, mode, pName, mirrorAx, keepUndo, -1, dLo, dHi) } ?: "ERR|Cancelled"
+                    val outer = safe { NativeBridge.nativeCut(handle, outlines.first, mode, "$pName (gap)", mirrorAx, keepUndo, -1, dLo, dHi) } ?: "ERR|Cancelled"
                     if (outer.startsWith("ERR|")) return outer
                     val tmp = outer.substringBefore('|').toIntOrNull() ?: return outer
-                    val inner = safe { NativeBridge.nativeCut(handle, outlines.second, mode, pName, mirrorAx, false, tmp) } ?: "ERR|Cancelled"
+                    val inner = safe { NativeBridge.nativeCut(handle, outlines.second, mode, pName, mirrorAx, false, tmp, dLo, dHi) } ?: "ERR|Cancelled"
                     safe { NativeBridge.nativeDeletePart(handle, tmp) }
                     return inner
                 }

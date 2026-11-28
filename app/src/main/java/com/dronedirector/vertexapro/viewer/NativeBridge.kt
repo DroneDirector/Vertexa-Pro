@@ -37,7 +37,10 @@ object NativeBridge {
     @JvmStatic external fun nativeSetCpuBudget(h: Long, bytes: Long)
     @JvmStatic external fun nativeRaycast(h: Long, x: Float, y: Float): FloatArray?
     @JvmStatic external fun nativeProject(h: Long, pts: FloatArray): FloatArray
-    @JvmStatic external fun nativeCut(h: Long, pts: FloatArray, mode: Int, name: String, mirrorAxis: Int, keepUndo: Boolean, onlyPart: Int): String
+    @JvmStatic external fun nativeCut(
+        h: Long, pts: FloatArray, mode: Int, name: String, mirrorAxis: Int, keepUndo: Boolean, onlyPart: Int, depthLo: Float, depthHi: Float,
+    ): String
+    @JvmStatic external fun nativePreviewCut(h: Long, pts: FloatArray?, depthLo: Float, depthHi: Float)
     @JvmStatic external fun nativeSetOrtho(h: Long, on: Boolean)
     @JvmStatic external fun nativeViewPreset(h: Long, preset: Int)
     @JvmStatic external fun nativeSetPartHinge(h: Long, part: Int, a: FloatArray, b: FloatArray, deg: Float)

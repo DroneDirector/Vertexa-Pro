@@ -22,6 +22,7 @@ class ModelSurfaceView(context: Context, private val controller: ViewerControlle
     private var lastFy = 0f
     private var multi = false
     private var drawing = false
+    private var handleDrag = false
     private var velocity: VelocityTracker? = null
 
     private val doubleTap = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
@@ -52,6 +53,24 @@ class ModelSurfaceView(context: Context, private val controller: ViewerControlle
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(e: MotionEvent): Boolean {
+        // dragging a point of the cut outline
+        if (e.actionMasked == MotionEvent.ACTION_DOWN && !controller.isDrawMode()) {
+            val h = controller.cutHandleAt(e.x, e.y)
+            if (h >= 0) {
+                handleDrag = true
+                controller.beginDragPoint(h)
+                return true
+            }
+        }
+        if (handleDrag) {
+            when (e.actionMasked) {
+                MotionEvent.ACTION_MOVE -> if (e.pointerCount == 1) controller.dragPoint(e.x, e.y)
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> { handleDrag = false; controller.endDragPoint() }
+                MotionEvent.ACTION_POINTER_DOWN -> { handleDrag = false; controller.endDragPoint() }
+            }
+            requestRender()
+            if (handleDrag || e.actionMasked != MotionEvent.ACTION_POINTER_DOWN) return true
+        }
         // drawing shapes for the cut tool: one finger draws, two fingers still move the view
         if (controller.isDrawMode() || drawing) {
             when (e.actionMasked) {
