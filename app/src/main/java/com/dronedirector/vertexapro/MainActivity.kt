@@ -43,8 +43,6 @@ import com.dronedirector.vertexapro.ui.BrowserScreen
 import com.dronedirector.vertexapro.data.BrowseItem
 import androidx.documentfile.provider.DocumentFile
 import com.dronedirector.vertexapro.ui.HomeScreen
-import com.dronedirector.vertexapro.ui.GeneratorScreen
-import com.dronedirector.vertexapro.ui.StartScreen
 import com.dronedirector.vertexapro.ui.SettingsScreen
 import com.dronedirector.vertexapro.ui.SplashScreen
 import com.dronedirector.vertexapro.ui.ThemeMode
@@ -94,8 +92,6 @@ class MainActivity : ComponentActivity() {
 private sealed interface Screen {
     data object Splash : Screen
     data object Home : Screen
-    data object Start : Screen
-    data object Generator : Screen
     data object Settings : Screen
     data class Browser(val title: String, val tree: Uri?, val id: Long = System.nanoTime()) : Screen
     data class Viewer(val source: ModelSource, val back: Screen = Home, val id: Long = System.nanoTime()) : Screen
@@ -129,7 +125,7 @@ private fun VertexaApp(activity: MainActivity, incoming: MutableStateFlow<Uri?>)
         prefs.addRecent(src)
         recents = prefs.recents()
         val cur = screen
-        screen = Screen.Viewer(src, back = if (cur is Screen.Browser || cur is Screen.Generator) cur else Screen.Home)
+        screen = Screen.Viewer(src, back = if (cur is Screen.Browser) cur else Screen.Home)
     }
 
     fun browseFolder(tree: Uri, name: String) {
@@ -272,14 +268,10 @@ private fun VertexaApp(activity: MainActivity, incoming: MutableStateFlow<Uri?>)
     // ---------------------------------------------------------------- back
     fun goBack() {
         val cur = screen
-        screen = when (cur) {
-            is Screen.Viewer -> cur.back
-            Screen.Home, Screen.Generator -> Screen.Start
-            else -> Screen.Home
-        }
+        screen = if (cur is Screen.Viewer) cur.back else Screen.Home
     }
 
-    BackHandler(enabled = screen != Screen.Start && screen != Screen.Splash || updatePhase.isOverlay()) {
+    BackHandler(enabled = screen != Screen.Home && screen != Screen.Splash || updatePhase.isOverlay()) {
         when {
             updatePhase is UpdatePhase.Downloading || updatePhase is UpdatePhase.Installing -> {}
             updatePhase.isOverlay() -> updatePhase = UpdatePhase.Idle
@@ -297,18 +289,10 @@ private fun VertexaApp(activity: MainActivity, incoming: MutableStateFlow<Uri?>)
             ) { s ->
                 when (s) {
                     Screen.Splash -> SplashScreen {
-                        screen = Screen.Start
+                        screen = Screen.Home
                         activity.applySystemBars(palette.isLight)
                         if (autoCheck) checkUpdates(silent = true)
                     }
-                    Screen.Start -> StartScreen(
-                        onStudio = { screen = Screen.Home },
-                        onGenerator = { screen = Screen.Generator },
-                    )
-                    Screen.Generator -> GeneratorScreen(
-                        onBack = { screen = Screen.Start },
-                        onOpen = { f -> open(ModelSource(android.net.Uri.fromFile(f), f.name, f.length())) },
-                    )
                     Screen.Home -> HomeScreen(
                         recents = recents,
                         folders = folders,

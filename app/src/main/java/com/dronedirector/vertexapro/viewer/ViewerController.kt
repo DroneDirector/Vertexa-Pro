@@ -348,7 +348,6 @@ class ViewerController(
             view?.requestRender()
         }
         if (clips.isNotEmpty()) playAnimation(true)
-        com.dronedirector.vertexapro.generator.GeneratorHandoff.take(source.uri)?.let { setupGenerated(it) }
         canEdit = safe { NativeBridge.nativeCanEdit(handle) } ?: false
         viewStore.last(source.uri.toString())?.let { cam ->
             safe { NativeBridge.nativeSetCamera(handle, cam, true) }
@@ -571,33 +570,6 @@ class ViewerController(
         val len: Int, val vert: Int, val tail: Int, val up: Int, val cS: Double, val half: DoubleArray, val n: Int,
         val st: Array<Array<DoubleArray>>,
     )
-
-    /** A model just made by the AI generator: real size, then flaps and ailerons cut as separate parts. */
-    private fun setupGenerated(profile: Int) {
-        scope.launch {
-            repeat(50) { if (!canEdit) delay(100) }
-            if (!canEdit) return@launch
-            aircraftType = profile
-            lastCut = "Setting up: real size…"
-            airSize = null
-            checkRealSize()
-            repeat(50) { if (airSize == null) delay(100) }
-            if (!airProfile.generic && (airSize?.byLength ?: 0.0) > 0) {
-                applyRealSize(true)
-                delay(200)
-                repeat(100) { if (airBusy) delay(100) }
-            }
-            lastCut = "Setting up: cutting flaps and ailerons…"
-            airFlaps = true
-            airAilerons = true
-            airTexture = true
-            cutControlSurfaces()
-            delay(300)
-            repeat(600) { if (airBusy) delay(100) }
-            lastCut = airStatus ?: lastCut
-            resetView()
-        }
-    }
 
     /** Model length and span against the chosen aircraft: the scale factor for real size. */
     fun checkRealSize() {

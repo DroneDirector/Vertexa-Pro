@@ -2,9 +2,7 @@
 
 ## Next
 
-- Generator now uses AI (Meshy) for realistic, textured aircraft: type any airliner, the AI builds it, and the app automatically scales it to real size and cuts flaps and ailerons as separate parts with hinges
-- Add your Meshy API key once in the Generator; it keeps working in the background while you use the rest of the app, with progress and Cancel
-- The old built-in generator stays available as "Offline — basic"
+- The Generator has been removed; the app opens straight into the Studio again
 - Aircraft tool: Airbus A319 added
 
 ## 1.0.21
