@@ -507,8 +507,11 @@ JNIEXPORT jboolean JNICALL FN(nativeSnapshot)(JNIEnv* env, jobject, jlong h, jin
     if (!out || env->GetDirectBufferCapacity(buffer) < (jlong)w * hh * 4) return JNI_FALSE;
     return E(h)->renderer.snapshot(w, hh, transparent, out) ? JNI_TRUE : JNI_FALSE;
 }
-JNIEXPORT jlong JNICALL FN(nativeBrushSelect)(JNIEnv*, jobject, jlong h, jfloat x, jfloat y, jfloat r, jboolean add, jboolean vertex, jboolean xray) {
-    return E(h)->renderer.brushSelect(x, y, r, add, vertex, xray);
+JNIEXPORT jlong JNICALL FN(nativeBrushSelect)(JNIEnv*, jobject, jlong h, jfloat x, jfloat y, jfloat r, jboolean add, jboolean vertex, jboolean xray, jint shape) {
+    return E(h)->renderer.brushSelect(x, y, r, add, vertex, xray, shape);
+}
+JNIEXPORT jlong JNICALL FN(nativeMoveSelection)(JNIEnv*, jobject, jlong h, jfloat dx, jfloat dy, jboolean begin) {
+    return E(h)->renderer.moveSelection(dx, dy, begin);
 }
 JNIEXPORT jlong JNICALL FN(nativeSelectionFromPreview)(JNIEnv*, jobject, jlong h) { return E(h)->renderer.selectionFromPreview(); }
 JNIEXPORT void JNICALL FN(nativeClearSelection)(JNIEnv*, jobject, jlong h) { E(h)->renderer.clearSelection(); }

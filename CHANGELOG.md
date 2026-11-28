@@ -2,6 +2,9 @@
 
 ## Next
 
+- Brush Move: drag with one finger to slide the selection across the model's surface — or move a whole drawn outline the same way
+- Brush shapes: circle, square, triangle and diamond (the magnifier shows the brush shape)
+
 - New Aircraft tool (plane button on the right): pick the type — Airbus A320ceo, A320neo, A321ceo, A321neo, Boeing 737-800, 737 MAX 8, ATR 72-600, or Other
 - Real size: scales the model to the real aircraft in metres (by length or by wingspan, with a proportions check), or set it from a measured distance
 - Cut flaps (and ailerons if wanted) on both wings in one go: the app finds the wings, places smooth outlines at the real-world positions and cuts only between the wing's top and bottom skin — engines, pylons, landing gear and tail are left alone. Each surface gets a hinge at its front edge, named L / R

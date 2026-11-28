@@ -885,6 +885,16 @@ class ViewerController(
     var brushKind by mutableIntStateOf(1)
     var brushAdd by mutableStateOf(true)
     var brushXray by mutableStateOf(false)
+    /** Move mode: dragging shifts the selection (or the outline) instead of painting. */
+    var brushMove by mutableStateOf(false)
+    /** 0 circle, 1 square, 2 triangle, 3 diamond. */
+    var brushShape by mutableIntStateOf(0)
+        private set
+    fun updateBrushShape(s: Int) { brushShape = s; cutPrefs.edit().putInt("shape", s).apply() }
+    private var moveAnchorX = 0f
+    private var moveAnchorY = 0f
+    private var moveOutlineStart: FloatArray? = null
+    private var moving = false
     var brushSelCount by mutableLongStateOf(0L)
         private set
     private var brushBusy = false
@@ -924,7 +934,63 @@ class ViewerController(
         }
     }
 
+    /** Finger down while painting: starts a stroke, or picks up the selection / outline to move it. */
+    fun paintDown(x: Float, y: Float) {
+        if (cutTool == TOOL_BRUSH && brushMove) {
+            moveAnchorX = x
+            moveAnchorY = y
+            moving = true
+            if (brushSelCount > 0) {
+                scope.launch { withContext(Dispatchers.Default) { safe { NativeBridge.nativeMoveSelection(handle, 0f, 0f, true) } } }
+            } else if (cutPoints.size >= 3) {
+                pushOutlineHistory()
+                moveOutlineStart = projectCutPoints().takeIf { pr -> pr.none { it.isNaN() } }
+            } else cutHint = "Select something or draw an outline first, then drag it to move it."
+            return
+        }
+        erasePaint(x, y)
+    }
+
+    private fun moveDrag(x: Float, y: Float) {
+        if (!moving || brushBusy) return
+        val dx = x - moveAnchorX
+        val dy = y - moveAnchorY
+        if (brushSelCount > 0) {
+            brushBusy = true
+            scope.launch {
+                val n = withContext(Dispatchers.Default) { safe { NativeBridge.nativeMoveSelection(handle, dx, dy, false) } }
+                brushBusy = false
+                if (n != null) brushSelCount = n
+                view?.requestRender()
+            }
+            return
+        }
+        val start = moveOutlineStart ?: return
+        val moved = FloatArray(start.size) { i -> start[i] + if (i % 2 == 0) dx else dy }
+        val p3 = safe { NativeBridge.nativeUnproject(handle, moved) } ?: return
+        cutPoints.clear()
+        for (i in 0 until p3.size / 3) cutPoints.add(floatArrayOf(p3[i * 3], p3[i * 3 + 1], p3[i * 3 + 2]))
+        view?.requestRender()
+    }
+
+    private fun moveEnd() {
+        moving = false
+        val start = moveOutlineStart
+        moveOutlineStart = null
+        if (start != null && brushSelCount == 0L) {
+            // lay the moved outline back onto the surface
+            val scr = projectCutPoints()
+            if (scr.none { it.isNaN() }) {
+                val pts = outlineFromScreen(scr)
+                if (pts.size == cutPoints.size) { cutPoints.clear(); cutPoints.addAll(pts) }
+            }
+            schedulePreview()
+        }
+        view?.requestRender()
+    }
+
     private fun brushPaint(x: Float, y: Float) {
+        if (brushMove) { moveDrag(x, y); return }
         showLoupe(x, y)
         if (brushBusy) return
         brushBusy = true
@@ -932,8 +998,9 @@ class ViewerController(
         val add = brushAdd
         val vertex = brushKind == 2
         val xray = brushXray
+        val shape = brushShape
         scope.launch {
-            val n = withContext(Dispatchers.Default) { safe { NativeBridge.nativeBrushSelect(handle, x, y, r, add, vertex, xray) } }
+            val n = withContext(Dispatchers.Default) { safe { NativeBridge.nativeBrushSelect(handle, x, y, r, add, vertex, xray, shape) } }
             brushBusy = false
             if (n != null) {
                 brushSelCount = n
@@ -1049,6 +1116,7 @@ class ViewerController(
     }
 
     fun eraseEnd() {
+        if (moving) { moveEnd(); return }
         eraseStroke = false
         hideLoupe()
         schedulePreview()

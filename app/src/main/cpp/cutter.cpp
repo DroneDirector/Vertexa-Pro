@@ -1230,7 +1230,7 @@ static int64_t countSel(const std::vector<std::vector<uint32_t>>& pv) {
     return n;
 }
 
-int64_t Renderer::brushSelect(float sx, float sy, float r, bool add, bool vertexMode, bool xray) {
+int64_t Renderer::brushSelect(float sx, float sy, float r, bool add, bool vertexMode, bool xray, int shape) {
     CutCam cc;
     if (!cutCamera(cc) || r <= 0) return selectionCount();
     std::vector<uint8_t> hidden;
@@ -1294,7 +1294,16 @@ int64_t Renderer::brushSelect(float sx, float sy, float r, bool add, bool vertex
         double z = zb[gy * G + gx];
         return z >= 1e299 || d <= z + eps;
     };
-    const double r2 = (double)r * r;
+    // brush shape: 0 circle, 1 square, 2 triangle (point up), 3 diamond
+    auto inBrush = [&](double x, double y) {
+        double ddx = x - sx, ddy = y - sy;
+        switch (shape) {
+            case 1: return std::fabs(ddx) <= r && std::fabs(ddy) <= r;
+            case 2: return ddy <= r * 0.5 && ddy >= -r + 1.7320508 * std::fabs(ddx);
+            case 3: return std::fabs(ddx) + std::fabs(ddy) <= r;
+            default: return ddx * ddx + ddy * ddy <= (double)r * r;
+        }
+    };
     for (auto& cd : cands) {
         const Chunk& c = *cpu_[cd.ci];
         const uint32_t* tr = &c.tris[cd.t * 3];
@@ -1303,7 +1312,7 @@ int64_t Renderer::brushSelect(float sx, float sy, float r, bool add, bool vertex
             float cen[3] = {(a[0] + b[0] + e[0]) / 3, (a[1] + b[1] + e[1]) / 3, (a[2] + b[2] + e[2]) / 3};
             double x, y;
             if (!projectCC(cc, cen, x, y)) continue;
-            if ((x - sx) * (x - sx) + (y - sy) * (y - sy) > r2 || !visible(x, y, depthOf(cen))) continue;
+            if (!inBrush(x, y) || !visible(x, y, depthOf(cen))) continue;
             tsel_[cd.ci][cd.t] = add ? 1 : 0;
             if (!add) for (int k = 0; k < 3; k++) vsel_[cd.ci][tr[k]] = 0;
         } else {
@@ -1311,7 +1320,7 @@ int64_t Renderer::brushSelect(float sx, float sy, float r, bool add, bool vertex
                 const float* p = c.verts[tr[k]].p;
                 double x, y;
                 if (!projectCC(cc, p, x, y)) continue;
-                if ((x - sx) * (x - sx) + (y - sy) * (y - sy) > r2 || !visible(x, y, depthOf(p))) continue;
+                if (!inBrush(x, y) || !visible(x, y, depthOf(p))) continue;
                 vsel_[cd.ci][tr[k]] = add ? 1 : 0;
                 if (!add) tsel_[cd.ci][cd.t] = 0;
             }
@@ -1818,6 +1827,124 @@ bool Renderer::scaleModel(double f, Sink* sink) {
         bounds_ = sink->bounds();
     }
     return true;
+}
+
+// Moves the brush selection across the surface by a screen offset (from where the drag began):
+// the selection's footprint on screen is shifted and laid back onto the visible surface there.
+int64_t Renderer::moveSelection(float dx, float dy, bool begin) {
+    CutCam cc;
+    if (!cutCamera(cc)) return selectionCount();
+    std::vector<uint8_t> hidden;
+    double diag = 1;
+    {
+        std::lock_guard<std::mutex> l(mu_);
+        hidden = hidden_;
+        if (bounds_.valid()) {
+            double a = bounds_.mx[0] - bounds_.mn[0], b = bounds_.mx[1] - bounds_.mn[1], c = bounds_.mx[2] - bounds_.mn[2];
+            diag = std::sqrt(a * a + b * b + c * c);
+        }
+    }
+    std::lock_guard<std::mutex> dl(dataMu_);
+    if (!keepCpu_ || cpu_.empty()) return 0;
+    ensureSel_();
+    if (begin || moveBase_.size() != cpu_.size()) {
+        moveBase_.assign(cpu_.size(), {});
+        for (size_t ci = 0; ci < cpu_.size(); ci++) {
+            const Chunk& c = *cpu_[ci];
+            moveBase_[ci].assign(c.tris.size() / 3, 0);
+            for (size_t t = 0; t * 3 + 2 < c.tris.size(); t++) {
+                const uint32_t* tr = &c.tris[t * 3];
+                moveBase_[ci][t] = tsel_[ci][t] || (vsel_[ci][tr[0]] && vsel_[ci][tr[1]] && vsel_[ci][tr[2]]);
+            }
+        }
+        if (begin) return countSel(preview_);
+    }
+    const double cell = 3.0;
+    const int GW = std::max(1, (int)std::ceil(cc.W / cell)), GH = std::max(1, (int)std::ceil(cc.H / cell));
+    std::vector<float> zb((size_t)GW * GH, 1e30f);
+    auto depthOf = [&](const float* p) { return (V3(p[0], p[1], p[2]) - cc.eye).dot(cc.fwd); };
+    auto visibleChunk = [&](const Chunk& c) {
+        return !c.points && !c.tris.empty() && !(c.part >= 0 && c.part < (int)hidden.size() && hidden[c.part]);
+    };
+    // what's in front: a coarse depth buffer of the whole view
+    auto raster = [&](const double* px, const double* py, const double* pd, auto&& visit) {
+        double den = (py[1] - py[2]) * (px[0] - px[2]) + (px[2] - px[1]) * (py[0] - py[2]);
+        if (std::fabs(den) < 1e-12) return;
+        int gx0 = std::max(0, (int)std::floor(std::min({px[0], px[1], px[2]}) / cell)), gx1 = std::min(GW - 1, (int)std::floor(std::max({px[0], px[1], px[2]}) / cell));
+        int gy0 = std::max(0, (int)std::floor(std::min({py[0], py[1], py[2]}) / cell)), gy1 = std::min(GH - 1, (int)std::floor(std::max({py[0], py[1], py[2]}) / cell));
+        for (int gy = gy0; gy <= gy1; gy++)
+            for (int gx = gx0; gx <= gx1; gx++) {
+                double cx = (gx + 0.5) * cell, cy = (gy + 0.5) * cell;
+                double w0 = ((py[1] - py[2]) * (cx - px[2]) + (px[2] - px[1]) * (cy - py[2])) / den;
+                double w1 = ((py[2] - py[0]) * (cx - px[2]) + (px[0] - px[2]) * (cy - py[2])) / den;
+                double w2 = 1 - w0 - w1;
+                if (w0 < -0.02 || w1 < -0.02 || w2 < -0.02) continue;
+                visit((size_t)gy * GW + gx, w0 * pd[0] + w1 * pd[1] + w2 * pd[2]);
+            }
+    };
+    auto proj3 = [&](const Chunk& c, size_t t, double* px, double* py, double* pd) {
+        for (int k = 0; k < 3; k++) {
+            const float* p = c.verts[c.tris[t * 3 + k]].p;
+            if (!projectCC(cc, p, px[k], py[k])) return false;
+            pd[k] = depthOf(p);
+        }
+        return true;
+    };
+    for (size_t ci = 0; ci < cpu_.size(); ci++) {
+        const Chunk& c = *cpu_[ci];
+        if (!visibleChunk(c)) continue;
+        for (size_t t = 0; t * 3 + 2 < c.tris.size(); t++) {
+            double px[3], py[3], pd[3];
+            if (!proj3(c, t, px, py, pd)) continue;
+            raster(px, py, pd, [&](size_t i, double d) { if (d < zb[i]) zb[i] = (float)d; });
+        }
+    }
+    const double eps = diag * 0.004;
+    auto centroid = [&](const Chunk& c, size_t t, double& x, double& y, double& d) {
+        const float* a = c.verts[c.tris[t * 3]].p; const float* b = c.verts[c.tris[t * 3 + 1]].p; const float* e = c.verts[c.tris[t * 3 + 2]].p;
+        float cen[3] = {(a[0] + b[0] + e[0]) / 3, (a[1] + b[1] + e[1]) / 3, (a[2] + b[2] + e[2]) / 3};
+        d = depthOf(cen);
+        return projectCC(cc, cen, x, y);
+    };
+    auto frontAt = [&](double x, double y, double d) {
+        int gx = (int)std::floor(x / cell), gy = (int)std::floor(y / cell);
+        if (gx < 0 || gy < 0 || gx >= GW || gy >= GH) return false;
+        float z = zb[(size_t)gy * GW + gx];
+        return z >= 1e29f || d <= z + eps;
+    };
+    // footprint of the visible part of the selection, shifted
+    std::vector<uint8_t> mask((size_t)GW * GH, 0);
+    for (size_t ci = 0; ci < cpu_.size(); ci++) {
+        const Chunk& c = *cpu_[ci];
+        if (!visibleChunk(c)) continue;
+        for (size_t t = 0; t * 3 + 2 < c.tris.size(); t++) {
+            if (!moveBase_[ci][t]) continue;
+            double x, y, d;
+            if (!centroid(c, t, x, y, d) || !frontAt(x, y, d)) continue;
+            double px[3], py[3], pd[3];
+            if (!proj3(c, t, px, py, pd)) continue;
+            for (int k = 0; k < 3; k++) { px[k] += dx; py[k] += dy; }
+            raster(px, py, pd, [&](size_t i, double) { mask[i] = 1; });
+            int gx = (int)std::floor((x + dx) / cell), gy = (int)std::floor((y + dy) / cell);
+            if (gx >= 0 && gy >= 0 && gx < GW && gy < GH) mask[(size_t)gy * GW + gx] = 1;
+        }
+    }
+    // new selection: visible triangles whose centre lies in the shifted footprint
+    for (size_t ci = 0; ci < cpu_.size(); ci++) {
+        const Chunk& c = *cpu_[ci];
+        std::fill(vsel_[ci].begin(), vsel_[ci].end(), 0);
+        for (size_t t = 0; t * 3 + 2 < c.tris.size(); t++) {
+            tsel_[ci][t] = 0;
+            if (!visibleChunk(c)) continue;
+            double x, y, d;
+            if (!centroid(c, t, x, y, d) || !frontAt(x, y, d)) continue;
+            int gx = (int)std::floor(x / cell), gy = (int)std::floor(y / cell);
+            if (gx < 0 || gy < 0 || gx >= GW || gy >= GH) continue;
+            if (mask[(size_t)gy * GW + gx]) tsel_[ci][t] = 1;
+        }
+    }
+    selToPreview_();
+    return countSel(preview_);
 }
 
 }  // namespace vx

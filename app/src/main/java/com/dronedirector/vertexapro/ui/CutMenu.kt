@@ -174,13 +174,22 @@ private fun BrushTab(c: ViewerController, p: Palette) {
     if (t == ViewerController.TOOL_BRUSH) {
         Spacer(Modifier.size(6.dp))
         ChipRow {
-            PillChip("Select", c.brushAdd, p) { c.brushAdd = true }
-            PillChip("Erase", !c.brushAdd, p) { c.brushAdd = false }
+            PillChip("Select", c.brushAdd && !c.brushMove, p) { c.brushAdd = true; c.brushMove = false }
+            PillChip("Erase", !c.brushAdd && !c.brushMove, p) { c.brushAdd = false; c.brushMove = false }
+            PillChip("Move", c.brushMove, p) { c.brushMove = true }
             PillChip("X-ray", c.brushXray, p) { c.brushXray = !c.brushXray }
             if (c.editPart >= 0) PillChip("Apply", true, p) { c.applyPartEdit() }
             else {
                 if (c.brushSelCount > 0) PillChip("Clear", false, p) { c.clearBrushSelection() }
                 if (c.brushSelCount > 0) PillChip("Create part", false, p) { c.createPartOpen = true }
+            }
+        }
+    }
+    if (t == ViewerController.TOOL_BRUSH && !c.brushMove) {
+        Spacer(Modifier.size(6.dp))
+        ChipRow {
+            listOf("● Circle", "■ Square", "▲ Triangle", "◆ Diamond").forEachIndexed { i, label ->
+                PillChip(label, c.brushShape == i, p) { c.updateBrushShape(i) }
             }
         }
     }
@@ -195,7 +204,8 @@ private fun BrushTab(c: ViewerController, p: Palette) {
     }
     Text(
         when (t) {
-            ViewerController.TOOL_BRUSH -> "Paint with one finger, two fingers move the view. X-ray also reaches polygons hidden behind."
+            ViewerController.TOOL_BRUSH -> if (c.brushMove) "Drag with one finger to slide the selection (or the outline) across the model. Two fingers move the view."
+                else "Paint with one finger, two fingers move the view. X-ray also reaches polygons hidden behind."
             ViewerController.TOOL_ERASE -> "Smooth erase keeps the exact cut line and protects what you paint (red)."
             else -> "Pick Polygons or Vertices to paint a selection, or Smooth erase to protect areas from an outline cut."
         },
@@ -308,8 +318,22 @@ fun CutLoupe(c: ViewerController, p: Palette) {
                 // crosshair on the finger
                 val f = map(at.x, at.y)
                 val r = if (c.cutTool == ViewerController.TOOL_ERASE || c.cutTool == ViewerController.TOOL_BRUSH) c.eraseBrushDp * density.density * k else 10.dp.toPx()
-                drawCircle(Color.Black.copy(alpha = 0.5f), r, f, style = Stroke(3.dp.toPx()))
-                drawCircle(Color.White, r, f, style = Stroke(1.5.dp.toPx()))
+                val shapeI = if (c.cutTool == ViewerController.TOOL_BRUSH) c.brushShape else 0
+                if (shapeI == 0) {
+                    drawCircle(Color.Black.copy(alpha = 0.5f), r, f, style = Stroke(3.dp.toPx()))
+                    drawCircle(Color.White, r, f, style = Stroke(1.5.dp.toPx()))
+                } else {
+                    val path = androidx.compose.ui.graphics.Path().apply {
+                        when (shapeI) {
+                            1 -> { moveTo(f.x - r, f.y - r); lineTo(f.x + r, f.y - r); lineTo(f.x + r, f.y + r); lineTo(f.x - r, f.y + r) }
+                            2 -> { moveTo(f.x, f.y - r); lineTo(f.x + r * 0.866f, f.y + r * 0.5f); lineTo(f.x - r * 0.866f, f.y + r * 0.5f) }
+                            else -> { moveTo(f.x, f.y - r); lineTo(f.x + r, f.y); lineTo(f.x, f.y + r); lineTo(f.x - r, f.y) }
+                        }
+                        close()
+                    }
+                    drawPath(path, Color.Black.copy(alpha = 0.5f), style = Stroke(3.dp.toPx()))
+                    drawPath(path, Color.White, style = Stroke(1.5.dp.toPx()))
+                }
                 drawLine(Color.White, Offset(f.x - 6.dp.toPx(), f.y), Offset(f.x + 6.dp.toPx(), f.y), strokeWidth = 1.dp.toPx())
                 drawLine(Color.White, Offset(f.x, f.y - 6.dp.toPx()), Offset(f.x, f.y + 6.dp.toPx()), strokeWidth = 1.dp.toPx())
             }

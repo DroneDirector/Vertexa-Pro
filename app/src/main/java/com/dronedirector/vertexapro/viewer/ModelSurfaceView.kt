@@ -75,7 +75,7 @@ class ModelSurfaceView(context: Context, private val controller: ViewerControlle
         // erase brush: one finger paints, two fingers still move the view
         if (controller.isPaintMode() || painting) {
             when (e.actionMasked) {
-                MotionEvent.ACTION_DOWN -> { painting = true; controller.erasePaint(e.x, e.y); return true }
+                MotionEvent.ACTION_DOWN -> { painting = true; controller.paintDown(e.x, e.y); return true }
                 MotionEvent.ACTION_MOVE -> if (painting && e.pointerCount == 1) { controller.erasePaint(e.x, e.y); return true }
                 MotionEvent.ACTION_UP -> if (painting) { painting = false; controller.eraseEnd(); requestRender(); return true }
                 MotionEvent.ACTION_POINTER_DOWN -> if (painting) {

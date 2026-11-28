@@ -94,7 +94,9 @@ public:
     void deletePart(int part, Sink* sink);
     // ---- brush selection (whole triangles / vertices), shown with the orange preview
     /** Paints with a round brush at a screen point; returns the number of selected triangles. */
-    int64_t brushSelect(float sx, float sy, float radiusPx, bool add, bool vertexMode, bool xray);
+    int64_t brushSelect(float sx, float sy, float radiusPx, bool add, bool vertexMode, bool xray, int shape = 0);
+    /** Shifts the selection across the surface by a screen offset from where the drag began. */
+    int64_t moveSelection(float dx, float dy, bool begin);
     /** Turns the triangles the pending outline would take into the brush selection. */
     int64_t selectionFromPreview();
     void clearSelection();
@@ -283,7 +285,7 @@ private:
     std::vector<std::shared_ptr<Chunk>> undo_;  // geometry before the last cut
     std::vector<std::shared_ptr<Chunk>> redo_;  // geometry after an undone cut
     std::unordered_map<int, int> parentPart_;  // cut part -> the part it was cut from
-    std::vector<std::vector<uint8_t>> tsel_, vsel_;  // brush selection per cpu_ chunk (triangles / vertices)
+    std::vector<std::vector<uint8_t>> tsel_, vsel_, moveBase_;  // brush selection per cpu_ chunk (triangles / vertices)
     void ensureSel_();
     void selToPreview_();
     // exact cut preview: the very pieces the cut would take, split along the outline
